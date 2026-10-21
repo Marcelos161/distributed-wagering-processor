@@ -13,13 +13,13 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após MikroORM e migrations
+## Comparação com o README — atualização após Money
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
 | PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Schema financeiro e constraints futuros |
-| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Pendente | Testes unitários e schema |
+| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Money implementado; demais pendentes | Invariantes entre entidades e schema |
 | BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Pendente | Fluxos de negócio e reversões |
 | Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
@@ -40,7 +40,7 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 1 | `chore: initialize NestJS project with Bun` | Concluída: base HTTP, configuração estrita, teste real, build e guias |
 | 2 | `chore: configure PostgreSQL and LocalStack` | Concluída em dois commits: PostgreSQL persistente e SQS FIFO/DLQ, com testes reais de reinício/recriação |
 | 3 | `chore: configure MikroORM and reversible migrations` | Concluída em commits de integração Nest e migrations; demonstrações apenas em bancos descartáveis |
-| 4 | `feat: implement immutable Money value object` | Decimal exato, escala e moedas; entradas inválidas, aritmética, imutabilidade e serialização |
+| 4 | `feat: implement immutable Money value object` | Concluída: decimal.js, escala 2, BRL/USD/EUR, precisão por operação e 73 testes de Money |
 | 5 | `feat: implement immutable wallet ledger entries` | Factory, rehydrate e equação antes/depois; sem mutação |
 | 6 | `feat: implement Wallet aggregate` | Abertura/debit/credit, version, saldo e ledger inseparáveis; testes de invariantes |
 | 7 | `feat: implement wager transaction state machine` | Kinds, transições, estados terminais, failure codes; casos válidos e inválidos |
@@ -96,8 +96,11 @@ carteira no PostgreSQL**. Essas escolhas orientam as etapas 2, 3 e 13;
 a infraestrutura das etapas 2 e 3 foi validada; locks financeiros permanecem pendentes. A decisão e as alternativas
 estão na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md).
 
-Antes de Money/regras financeiras, fechar escala de entrada, valor zero, limites
-monetários e referências opcionais. A aprovação acima não decide essas ambiguidades.
+Money exige exatamente duas casas e admite zero; entradas negativas são rejeitadas,
+resultados matemáticos assinados são internos. Foram aprovadas precisão por operação
+sem teto monetário nesta etapa e moedas BRL/USD/EUR (ADR-008). Antes dos contratos
+financeiros/schema, decidir limites de payload/NUMERIC, zero por operação e referências
+opcionais. Concluir Money não autoriza implementar a etapa seguinte automaticamente.
 
 Também foi aprovado usar LocalStack Community anterior sem token, fixado por
 versão/digest, após identificar a exigência de conta nas versões atuais. A ADR-005

@@ -747,13 +747,15 @@ Teste de carga também conta como diferencial. Se fizer, exponha como `bun run t
 
 ---
 
-## Implementação do candidato — etapas 1 a 3
+## Implementação do candidato — etapas 1 a 4
 
 O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
 `GET /health/live`, PostgreSQL persistente e SQS FIFO/DLQ em LocalStack Community
 4.14.0, sem token. MikroORM está integrado ao NestJS com papel restrito; CLI oficial
-de migrations configurada e validada em bancos descartáveis. O domínio financeiro
-e seu schema permanecem pendentes.
+de migrations configurada e validada em bancos descartáveis. Money é imutável,
+usa decimal.js e aceita contratos com escala 2 em BRL/USD/EUR; tem testes unitários
+independentes de infraestrutura. Wallet, ledger, processamento e schema financeiro
+permanecem pendentes. Para estudar só Money: `bun test ./test/money.test.ts`.
 
 Com Bun 1.4.3 disponível, execute na raiz:
 

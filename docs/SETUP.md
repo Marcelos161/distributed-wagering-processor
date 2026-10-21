@@ -61,7 +61,8 @@ para containers; não é necessário para a execução local atual.
 | `bun run dev` | Reinicia ao alterar arquivos |
 | `bun run start` | Executa o entrypoint TypeScript com Bun |
 | `bun run typecheck` | Checa tipos de fontes e testes sem emitir JS |
-| `bun run test` | Executa 24 casos de configuração/HTTP real; exige DATABASE_URL + PostgreSQL |
+| `bun run test` | Executa 97 casos: Money, configuração e HTTP real; exige DATABASE_URL + PostgreSQL |
+| `bun test ./test/money.test.ts` | 73 testes unitários de Money; não exige Docker, Nest ou variáveis de banco |
 | `bun run build` | Compila fontes em dist com checagem de tipos |
 | `bun run start:built` | Executa dist/main.js; exige build anterior |
 | `bun run check` | Typecheck, testes e build, nessa ordem; interrompe na primeira falha |
@@ -83,7 +84,9 @@ para containers; não é necessário para a execução local atual.
   a um crash por regra financeira. Ainda não há worker SQS para drenar.
 
 Os resultados efetivamente observados estão no [guia de aprendizado](LEARNING_GUIDE.md).
-Migrations e testes financeiros distribuídos pertencem às próximas etapas.
+Migrations já possuem testes isolados; schema financeiro e testes distribuídos
+pertencem às próximas etapas. Money pode ser estudado/testado isoladamente pelo
+comando acima; exemplos e cada método estão na seção 12 do guia.
 
 ## PostgreSQL local
 

@@ -25,7 +25,7 @@ genéricos. Locks pessimistas futuros usarão EM transacional; ainda não implem
 Evidência: Nest + SQL real + HTTP, schema vazio e DDL negado para app em banco
 descartável; credencial admin recusada. Nenhuma tabela criada no banco principal.
 
-Estado em 21/10/2026: **NestJS, PostgreSQL/SQS, MikroORM e sistema de migrations implementados**. Há decisões
+Estado em 21/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations e Money implementados**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -126,7 +126,7 @@ nas etapas correspondentes.
 |---|---|---|
 | ORM (aprovado) | MikroORM; proposta de entidades de persistência separadas do domínio | TypeORM é aceito; separar mapeamento exige código adicional, mas mantém domínio independente |
 | Emulador (aprovado) | LocalStack em Compose | MiniStack é permitido; verificar disponibilidade/licença e imagem antes de fixar versão |
-| Dinheiro | `bigint` em centavos internamente; string decimal na borda; PostgreSQL `NUMERIC(p,2)` | Decimal de precisão configurada também serve; bigint elimina arredondamento implícito nas operações exigidas (soma/subtração), mas exige serialização explícita. Definir limite `p` e rejeição de overflow antes do schema |
+| Dinheiro (adotado na ADR-008) | decimal.js encapsulado; precisão por operação e strings com escala 2 | Substitui a proposta de bigint em centavos, seguindo o pedido do usuário. Limite e mapeamento PostgreSQL NUMERIC(p,2) serão definidos antes do schema |
 | Concorrência (aprovada) | Lock pessimista na linha da wallet durante a transação SQL | Lock otimista precisa retries; UPDATE condicionado também protege saldo, mas exige coordenar resultado, ledger e reversões. Lock por wallet simplifica raciocínio e limita vazão de uma carteira muito disputada |
 | Idempotência | Unicidade persistente da key e de `(providerId, externalTransactionId)`; hash canônico e snapshot do resultado | Cache e deduplicação FIFO não sobrevivem como garantia suficiente. Resolver colisão com a linha persistida sem duplicar efeito; definir escopo exato da key |
 | Inbox | `(consumerName, messageId)` único, hash do conteúdo e processamento atômico | Inbox sozinha não identifica uma mesma transação enviada com outro messageId; a idempotência de negócio continua necessária |
@@ -160,8 +160,9 @@ descartável, sem prometer reversão segura de dados reais.
    validação e espera quando ela vier preenchida.
 3. Quantias zero em BET/WIN/REFUND/ROLLBACK não estão completamente especificadas.
    Definir comportamento em relação a ledger e `version`; abertura zero não gera OPENING.
-4. Contratos exigem escala fixa 2 e citam rejeição de mais de 2 casas. Decidir se
-   `"25"`/`"25.0"` serão rejeitados ou normalizados antes de definir hash canônico.
+4. Escala de Money fechada nesta etapa: `"25"`/`"25.0"` são rejeitados; exigimos
+   exatamente duas casas, conforme o pedido. Zeros à esquerda são normalizados
+   na saída; a futura definição de hash canônico deverá considerar essa representação.
 5. Estados terminais não mudam. Especificar snapshot de replay, respostas pendentes
    e falhas permanentes sem marcar uma falha transitória como terminal.
 6. Destino dos eventos Outbox, ordenação por agregado e política de retries precisam
@@ -169,11 +170,58 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Não existem domínio financeiro, migrations de schema financeiro, idempotência, autenticação,
-reconciliação, métricas ou testes distribuídos. Nenhuma garantia financeira foi
-demonstrada. Os testes reais de infraestrutura provam conexão, configuração,
+Money possui aritmética exata, validação e imutabilidade testadas. Não existem Wallet,
+ledger, processamento, migrations de schema financeiro, idempotência, autenticação,
+reconciliação, métricas ou testes distribuídos. As garantias financeiras entre
+entidades continuam pendentes. Os testes reais de infraestrutura provam conexão, configuração,
 mensageria, persistência PostgreSQL e rollback de migrations/transações de prova;
 não provam atomicidade financeira entre wallet, ledger, inbox e outbox.
+
+## ADR-008 — Money decimal imutável e contratos externos restritos (adotada)
+
+Pedido da etapa 4 escolhe decimal.js encapsulado, domínio sem Nest/ORM e entradas
+com exatamente duas casas. O usuário aprovou **precisão ajustada aos operandos**,
+sem teto monetário de negócio nesta etapa, e **lista inicial BRL/USD/EUR**. A
+proposta anterior de bigint em centavos foi substituída; esse modelo também seria
+exato para soma/subtração, mas seguimos a biblioteca preferida para esta entrega.
+
+decimal.js 10.6.0, import nomeado compatível com NodeNext/Bun. MoneyDecimal é clone
+privado: configuração global externa não altera Money. Parsing da string não
+arredonda. Cada add/subtract usa outro clone cuja precisão é max(comprimentos dos
+operandos em escala fixa)+1. Esse limite excede o número de dígitos necessários
+para soma/subtração, inclusive transporte, negativos e cancelamento. Não há
+conversão de quantias para number. Escala/contagem de dígitos são metadados numéricos.
+Alternativa de precisão fixa exigiria teto/overflow explícitos; usar o default 20
+em todas as contas não preservaria centavos em valores grandes. Clone por conta
+tem custo de alocação, aceito sem alegação de desempenho antes de medições.
+
+from é o limite externo não negativo: valida estrutura, tipo, formato estrito e
+moeda antes de Decimal. Não aceita expoente, sinais, whitespace, NaN/Infinity ou
+escala diferente de 2; não corrige por trim, uppercase ou arredondamento. Zeros à
+esquerda são aceitos e a saída decimal os elimina. Lista explícita de moedas evita
+admitir qualquer sequência de três letras; ampliar suporte exige revisão de escala.
+
+Subtract/negate podem produzir negativos internamente. Não existe factory pública
+de valores assinados, flag para ignorar validação ou rehydrate nesta etapa. toJSON
+pode representar resultados negativos; from continua recusando esses valores.
+Assim podemos expressar diferenças e inversos sem admitir quantia externa negativa.
+Wallet terá a responsabilidade distinta de não admitir saldo negativo. Um futuro
+mapeamento de valores assinados persistidos precisará de decisão própria.
+
+Campo #value e helper #calculate são privados em runtime; currency readonly e
+Object.freeze protegem estado externo. Decimal não é exposto. Construtor private
+recebe token Symbol interno para também rejeitar construção direta em JavaScript.
+Operações retornam novas instâncias, inclusive zero; toJSON retorna DTO independente.
+toString usa `quantia moeda`; serialização de transporte usa toJSON. Todas as
+operações binárias, inclusive equals, lançam MoneyError/CURRENCY_MISMATCH entre
+moedas diferentes. Outros códigos: INVALID_AMOUNT e UNSUPPORTED_CURRENCY. Não há
+hierarquia genérica de domínio nem mapeamento HTTP antecipado.
+
+Limites técnicos de memória/strings/decimal.js permanecem; ausência de teto de
+negócio não significa capacidade infinita. Limite de payload e NUMERIC(p,2) serão
+decididos antes da persistência/exposição financeira. Testes cobrem 25, 100 e 1000
+dígitos inteiros, 0.10+0.20, entradas inválidas, sinais, imutabilidade e isolamento
+da configuração decimal. Nenhum schema, endpoint ou fluxo financeiro foi criado.
 
 ## ADR-007 — Migrations administrativas explícitas e testes isolados (adotada)
 

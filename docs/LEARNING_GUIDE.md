@@ -881,3 +881,377 @@ O smoke compilado e os scripts raiz foram sondas adicionais fora da contagem Bun
 Nenhuma migration foi aplicada em wagering. A tabela de controle histórico permanece
 após down; os dados da tabela removida não são recuperáveis por esse mecanismo.
 Referência: [migrations MikroORM](https://mikro-orm.io/docs/migrations).
+
+## 12. Money: um Value Object financeiro
+
+### Valor, identidade e imutabilidade
+
+Um **Value Object** é definido pelo conteúdo. Dois Money de 25.00 BRL são iguais
+mesmo quando são objetos diferentes na memória. Não existe um id de Money a
+preservar. Uma **Entity**, como a futura Wallet, tem identidade: a mesma carteira
+continua sendo a mesma entidade depois que seu saldo muda.
+
+Imutabilidade significa que a instância não muda depois de criada. Se `saldo`
+representa 100.00 BRL, `saldo.subtract(aposta)` produz outro Money: quem ainda
+referencia saldo continua vendo 100.00 BRL. Isso evita alterações indiretas por
+compartilhamento de objetos e simplifica testar as operações.
+
+O construtor privado impede criação direta pelo código TypeScript consumidor.
+As factories são os pontos nomeados de criação: `from` valida o contrato externo,
+enquanto `zero` expressa a intenção de obter o elemento neutro da soma. O domínio
+não recebe instâncias de Decimal de seus consumidores nem as devolve.
+
+### Por que string e decimal
+
+O `number` de JavaScript usa representação binária de ponto flutuante. Frações
+decimais comuns não têm representação binária finita: 0.1 + 0.2 pode produzir
+0.30000000000000004. Converter esse resultado para string ou Decimal depois da
+conta não desfaz a perda ocorrida antes.
+
+Money recebe strings: `"0.10"` e `"0.20"`. decimal.js representa sinal, expoente e
+dígitos decimais, sem converter a quantia inteira para um number binário. A
+biblioteca usa números pequenos internamente para armazenar blocos de dígitos;
+isso não equivale a representar a quantia monetária como number. Nossa API não
+aceita números e não chama parseFloat, Number ou toNumber para dinheiro.
+
+Escala e precisão são diferentes: **escala 2** é a quantidade de casas depois do
+ponto; **precisão** é a quantidade de dígitos significativos da operação. Mesmo
+uma biblioteca decimal pode arredondar se a precisão escolhida for insuficiente.
+O limite futuro de uma coluna PostgreSQL NUMERIC(p,2) será uma decisão de
+persistência; não foi criado schema financeiro nesta etapa.
+
+### Entrada externa e resultados assinados
+
+`Money.from` recebe somente strings não negativas com exatamente duas casas.
+`"25"`, `"25.0"`, `"25.001"`, `"-25.00"`, `"-0.00"`, `"1e2"`, NaN, Infinity,
+espaços, vírgulas e strings vazias são recusados; não há arredondamento para
+aceitá-los. Zero é válido em Money: regras específicas sobre apostas zero
+pertencerão aos respectivos contratos e regras de negócio.
+
+Resultados internos podem ser negativos: 5.00 menos 8.00 resulta em -3.00.
+`negate` também precisa representar o inverso aditivo. Isso não autoriza receber
+uma aposta negativa. Serializar um resultado negativo não o transforma em uma
+entrada válida: tentar reconstruí-lo com `from` é rejeitado. Não existe factory
+pública `fromSigned` nem opção para desabilitar essa validação.
+
+Money verifica aritmética e moeda. A futura Wallet deverá verificar se um débito
+deixaria o saldo negativo e rejeitá-lo, além de coordenar saldo e ledger. Money,
+sozinho, não garante saldo não negativo, concorrência, idempotência ou atomicidade.
+
+### Independência do domínio
+
+O domínio importa apenas a biblioteca de cálculo e seu erro de domínio. Não
+importa NestJS, MikroORM, SQL, controller ou decorator. Uma regra como somar duas
+quantias pode ser testada sem iniciar servidor, banco ou fila. Futuramente, a
+infraestrutura converterá as colunas exatas de valor/moeda para Money, preservando
+essa direção de dependências. O mapeamento ORM não faz parte desta entrega.
+
+### Decisões aprovadas e garantia de precisão
+
+O usuário aprovou precisão ajustada aos operandos e a lista inicial **BRL, USD,
+EUR**, todas com duas casas. Uma lista explícita aceita somente moedas suportadas;
+uma regex de três letras aceitaria códigos inexistentes. Não implementamos um
+catálogo ISO completo, moedas de outras escalas ou câmbio. `currency` continua
+string na assinatura de referência; a factory valida seu conteúdo em runtime.
+
+Usamos decimal.js **10.6.0**, versão fixa em package.json e bun.lock. A proposta
+antiga de bigint em centavos foi substituída pela preferência do pedido por uma
+biblioteca decimal encapsulada. Bigint seria adequado para soma/subtração, mas não
+é a representação de Money nesta entrega.
+
+Em [money.ts](../src/domain/money/money.ts), `MoneyDecimal` é um construtor Decimal
+clonado e não exportado. Ele fixa precision=20, ROUND_HALF_EVEN e a faixa de
+expoentes da biblioteca. **A precisão 20 não é usada como teto de soma/subtração**:
+construir Decimal de string não arredonda; cada operação cria outro clone com
+precisão suficiente. Nenhum Decimal.set global é usado por Money.
+
+Para calcular, formatamos os dois operandos em escala 2 e escolhemos:
+
+```ts
+const precision = Math.max(left.length, right.length) + 1;
+```
+
+Se o maior operando tem I dígitos inteiros, o resultado de soma/subtração precisa,
+no máximo, de I+1 dígitos inteiros e dois fracionários: I+3 dígitos no total. O
+comprimento da string já inclui I+2 dígitos e um ponto; somamos mais um para o
+transporte (por exemplo 999.99 + 0.01). Um sinal negativo só aumenta essa folga.
+Por isso a precisão escolhida é suficiente também para subtração de negativos,
+cancelamento de valores grandes e diferenças de um centavo. Não há divisão ou
+multiplicação pública para invalidar essa demonstração.
+
+Math.max, comprimentos, escala e precisão são números de **metadados**, não
+quantias monetárias. Todas as quantias continuam strings/Decimal. toFixed(2) só
+formata: a entrada validada e as operações disponíveis nunca produzem frações
+menores que um centavo. Não usamos arredondamento para admitir entrada inválida.
+ROUND_HALF_EVEN é explícito, mas não deve descartar dígitos nessas operações.
+
+Não estabelecemos teto monetário de negócio. Isso não significa recursos infinitos:
+memória, tamanho máximo de strings e limites da biblioteca continuam existindo.
+Um limite para payloads e para NUMERIC(p,2) deverá ser definido antes de expor e
+persistir valores. Criar um clone por operação prioriza clareza/isolar configuração;
+nenhum benchmark de desempenho financeiro foi realizado.
+
+### Contratos, estado privado e erros
+
+`MoneyProps` é apenas o DTO `{ amount: string; currency: string }`. Não tem métodos.
+from recebe esse formato e toJSON produz um objeto novo no mesmo formato. O tipo
+string não expressa sozinho a restrição de sinal: essa regra é executada por from.
+Zeros redundantes à esquerda, como `00025.10`, são aceitos e serializados como
+`25.10`; escala, valor e moeda não mudam. Não há trim nem uppercase para corrigir
+entradas. A comparação com trim serve somente para rejeitar whitespace, inclusive
+a quebra de linha final que o `$` de uma regex JavaScript poderia admitir.
+
+`#value` é um campo privado ECMAScript, inacessível ao consumidor em runtime;
+`readonly` impede reatribuição no TypeScript. Não há getter que exponha Decimal.
+`currency` é pública e readonly, e Object.freeze bloqueia alteração da instância
+em JavaScript. O Decimal interno não é exposto nem alterado pelas operações.
+
+O construtor privado TypeScript desaparece como restrição no JavaScript emitido.
+Por isso acrescentamos um terceiro argumento interno, `constructionToken`, um
+Symbol não exportado. Só factories e operações da classe conhecem esse token.
+Construção direta por Reflect.construct é recusada; criar outro Symbol com o
+mesmo texto não gera a mesma identidade. Essa pequena adaptação preserva as
+assinaturas públicas do README e não oferece factory pública de valores assinados.
+
+Em [money-error.ts](../src/domain/money/money-error.ts), `MoneyErrorCode` é a união
+de literais INVALID_AMOUNT, UNSUPPORTED_CURRENCY e CURRENCY_MISMATCH. O construtor
+`MoneyError(code: MoneyErrorCode, message: string)` chama super(message), atribui
+code e name='MoneyError' e produz um Error de domínio. Não valida regras nem chama
+infraestrutura: é usado por from/assertSameCurrency e pode ser identificado por
+instanceof e code. Exemplo: `Money.zero('XYZ')` lança UNSUPPORTED_CURRENCY. Os
+consumidores futuros decidirão o status HTTP/resultado de negócio; isso não está
+embutido na classe. Nenhum payload financeiro é incluído nas mensagens.
+
+### Cada método de Money
+
+As implementações abaixo ficam em [money.ts](../src/domain/money/money.ts).
+Chamadores atuais são os testes; futuros chamadores serão regras de domínio.
+Os métodos são síncronos. Métodos que recebem `other` exigem uma instância Money
+válida; não são decodificadores de objetos JSON. Um consumidor JavaScript que
+desrespeite esse contrato pode receber TypeError. Falhas de recursos/biblioteca
+propagam, sem conversão para zero ou resultado aproximado.
+
+#### `private constructor(value, currency, token)`
+
+- Parâmetros: Decimal interno, moeda string já validada e Symbol interno.
+- Resultado: uma instância Money; construtores não declaram retorno próprio.
+- Fluxo: confere token; transforma qualquer zero em Decimal('0') para eliminar
+  zero negativo; armazena o campo privado e a moeda; congela a instância.
+- Validação/erro: token diferente lança TypeError. Valor/moeda vêm somente dos
+  caminhos internos validados; não há revalidação externa que impediria negativos.
+- Chamado por from, negate e #calculate. Exemplo interno: criar o resultado de
+  5.00 - 8.00. Centraliza normalização de zero e imutabilidade em todos os caminhos.
+
+#### `static from(props: MoneyProps): Money`
+
+- Objetivo: única entrada pública para uma quantia externa.
+- Fluxo: exige objeto não nulo/não array; amount deve ser string sem whitespace,
+  somente dígitos, ponto e exatamente duas casas; valida a lista de moedas;
+  constrói Decimal da string e Money com token interno.
+- Erros: INVALID_AMOUNT para contrato/quantia inválida; UNSUPPORTED_CURRENCY
+  para moeda ausente, não string ou não suportada. A validação precede Decimal.
+- Exemplo: `Money.from({ amount: '25.00', currency: 'BRL' })`.
+- Chamadores: consumidores e zero. Validação de runtime continua necessária
+  porque TypeScript não valida JSON ou chamadas JavaScript.
+
+#### `static zero(currency: string): Money`
+
+- Objetivo: criar o elemento neutro com moeda explícita.
+- Fluxo: delega a from com amount='0.00'; retorna nova instância a cada chamada.
+- Validação/erro: reutiliza a lista e UNSUPPORTED_CURRENCY de from.
+- Exemplo: `Money.zero('BRL')`. Não há singleton mutável nem moeda padrão implícita.
+
+#### `add(other: Money): Money`
+
+- Objetivo: somar quantias; retorna nova instância, sem alterar os operandos.
+- Fluxo: delega a #calculate(other,'add'), que valida moeda e precisão antes de plus.
+- Erro de domínio: CURRENCY_MISMATCH. Resultados assinados são permitidos.
+- Exemplo: 0.10 BRL + 0.20 BRL → 0.30 BRL. Delegação evita duplicar a política de precisão.
+
+#### `subtract(other: Money): Money`
+
+- Objetivo: calcular this - other; retorna novo Money.
+- Fluxo: delega a #calculate(other,'subtract'), que valida moeda e executa minus.
+- Erro de domínio: CURRENCY_MISMATCH. Não lança por resultado negativo: impedir
+  saldo negativo será responsabilidade da Wallet, não da subtração matemática.
+- Exemplo: 5.00 BRL - 8.25 BRL → -3.25 BRL. Usa a mesma proteção de precisão de add.
+
+#### `negate(): Money`
+
+- Sem parâmetros; retorna nova instância com o inverso aditivo.
+- Fluxo: Decimal.negated inverte somente o sinal, preservando os dígitos; constrói
+  Money com a mesma moeda. O construtor normaliza zero novamente.
+- Não há nova validação nem erro de domínio para estado válido.
+- Exemplo: 12.34 → -12.34 → 12.34. Não precisa passar por from nem aceitar input negativo.
+
+#### `isZero(): boolean`
+
+- Sem parâmetros; delega a Decimal.isZero, sem alterar estado ou validar de novo.
+- Exemplo: `Money.zero('BRL').isZero()` → true. Não lança erro de domínio em estado válido.
+- Permite decisões de domínio sem expor Decimal nem converter valores para number.
+
+#### `isPositive(): boolean`
+
+- Sem parâmetros; compara Decimal com a string '0' usando greaterThan.
+- Retorna true somente para quantias estritamente maiores que zero. Zero retorna false.
+- Exemplo: 0.01 → true. Sem nova validação/erro de domínio.
+- Preferimos comparação estrita porque o teste de sinal do Decimal também considera +0.
+
+#### `isNegative(): boolean`
+
+- Sem parâmetros; compara com '0' usando lessThan. Retorna true somente abaixo de zero.
+- Exemplo: 0.00 - 0.01 → true; zero negado → false.
+- Sem nova validação/erro de domínio. Define sinal matemático, sem expor o detalhe de -0.
+
+#### `isLessThan(other: Money): boolean`
+
+- Fluxo: assertSameCurrency, depois comparação Decimal.lessThan; não cria Money.
+- CURRENCY_MISMATCH em moedas distintas. Mesmo valor retorna false.
+- Exemplo: -3.00 BRL < 0.00 BRL → true. Não compara strings lexicograficamente.
+
+#### `equals(other: Money): boolean`
+
+- Fluxo: assertSameCurrency, depois Decimal.equals; retorna igualdade de valor.
+- CURRENCY_MISMATCH em moedas distintas, inclusive para zeros; não retorna false
+  silenciosamente, seguindo a regra de operações entre moedas do README.
+- Exemplo: duas instâncias distintas de 25.00 BRL → true. Evita igualdade por referência.
+
+#### `toJSON(): MoneyProps`
+
+- Sem parâmetros; retorna objeto novo com amount=Decimal.toFixed(2) e currency.
+- Não expõe Decimal nem uma referência guardada. Sem nova validação/erro de domínio.
+- Exemplo: JSON.stringify(Money.zero('BRL')) → `{"amount":"0.00","currency":"BRL"}`.
+- Chamado explicitamente ou por JSON.stringify. Mantém duas casas e evita notação científica.
+  Um resultado negativo mantém seu sinal; isso não o torna válido para from.
+
+#### `toString(): string`
+
+- Sem parâmetros; formata amount com toFixed(2), espaço e moeda.
+- Exemplo: `25.00 BRL`. Sem nova validação/erro de domínio.
+- Usado para apresentação/diagnóstico; o contrato de transporte continua sendo toJSON.
+  Não é parser nem formato locale que troque ponto por vírgula.
+
+#### `private assertSameCurrency(other: Money): void`
+
+- Compara currency das duas instâncias; retorna undefined quando iguais.
+- Lança CURRENCY_MISMATCH se diferentes. Chamado por #calculate, equals e isLessThan.
+- Exemplo: 25.00 BRL e 25.00 USD são recusados. Centraliza a regra sem implementar câmbio.
+
+#### `#calculate(other: Money, operation: 'add' | 'subtract'): Money`
+
+- Helper privado em runtime, chamado somente por add/subtract.
+- Fluxo: valida moeda; formata os dois valores; calcula a precisão pelo comprimento;
+  clona MoneyDecimal; cria Decimal do operando esquerdo; executa plus ou minus
+  com o direito; encapsula resultado em novo Money com a moeda original.
+- CURRENCY_MISMATCH antes da conta; falhas técnicas de recursos/configuração
+  propagam. Não captura falha para arredondar ou devolver um valor parcial.
+- Exemplo: 999.99 + 0.01 → 1000.00. O clone local evita alterar configuração global
+  ou de instâncias anteriores e dá espaço para o dígito adicional do resultado.
+
+### Exemplo completo: quantia inicial, aposta e prêmio
+
+Este exemplo exercita somente aritmética; não processa uma aposta nem cria Wallet:
+
+```ts
+const initial = Money.from({ amount: '100.00', currency: 'BRL' });
+const stake = Money.from({ amount: '25.00', currency: 'BRL' });
+const prize = Money.from({ amount: '40.50', currency: 'BRL' });
+const afterStake = initial.subtract(stake);
+const afterPrize = afterStake.add(prize);
+// initial.toString()    → '100.00 BRL'
+// afterStake.toString() → '75.00 BRL'
+// afterPrize.toJSON()   → { amount: '115.50', currency: 'BRL' }
+```
+
+Uma futura Wallet validará moeda, valor permitido da operação e saldo suficiente,
+e só então adotará um novo saldo junto ao ledger. Este exemplo não afirma que
+essa coordenação ou persistência exista.
+
+### O que cada teste comprova
+
+[money.test.ts](../test/money.test.ts) usa Bun e a classe real, sem mocks.
+Callbacks de test são síncronas, sem argumentos e retorno void. Em test.each,
+recebem o caso descrito abaixo e retornam void; falhas de expect propagam ao runner.
+As funções passadas a toThrow executam a operação para que o runner capture seu
+erro. Casts de unknown existem somente nos testes para simular JSON/runtime inválido.
+
+| Teste/grupo | Parâmetro e prova |
+|---|---|
+| creates a value object | Sem parâmetro; moeda, DTO e apresentação de 25.00 BRL |
+| adds decimal fractions | Sem parâmetro; 0.10 + 0.20 = 0.30 e subtração inversa |
+| subtracts exactly | Sem parâmetro; diferença positiva/negativa e recomposição do valor |
+| negation reverses sign | Sem parâmetro; sinal invertido, dupla negação e soma com inverso igual a zero |
+| compares signed amounts | Sem parâmetro; instâncias distintas iguais, desigualdade, ordenação estrita e negativos |
+| classifies positive, negative and zero | Sem parâmetro; três predicados em cada classe de sinal e normalização de zero |
+| rejects invalid external decimal syntax (26 casos) | amount string; vazio/whitespace, NaN/Infinity, expoentes, escala, sinais, separadores e outros formatos recusados |
+| rejects non-string runtime amounts (7 casos) | Objeto com amount desconhecido; números, null, undefined, objeto e array não sofrem coerção |
+| rejects malformed runtime contracts (5 casos) | Objeto com input desconhecido; contrato nulo, ausente, incompleto, array ou string é recusado |
+| does not admit a signed internal result | Sem parâmetro; serializar negativo não permite reenviá-lo à factory externa |
+| all arithmetic returns new instances | Sem parâmetro; add/subtract/negate criam referências novas e preservam ambos os operandos, inclusive operações com zero |
+| freezes public state | Sem parâmetro; alteração do input/DTO não altera Money e Reflect.set não modifica a instância |
+| JSON serialization | Sem parâmetro; JSON estável para positivo, negativo interno e zero, sempre duas casas |
+| example: initial amount | Sem parâmetro; 100.00 - 25.00 + 40.50 = 115.50, preservando estados anteriores |
+| supports currency (3 casos) | currency string; BRL/USD/EUR funcionam e zero tem mesma moeda/escala |
+| rejects unsupported currencies (10 casos) | currency desconhecida; formato inválido e códigos não suportados falham em from e zero |
+| different currencies (4 casos) | Nome do método add/subtract/isLessThan/equals; BRL/USD são recusados nas duas ordens |
+| domain failures have stable codes | Sem parâmetro; três callbacks run criam erros diferentes, capturados com classe/name/code esperados; expect.assertions(9) impede sucesso se não houver throw |
+| canonicalizes leading zeros | Sem parâmetro; 00025.10 vira 25.10 sem alterar valor/escala |
+| private construction at runtime | Sem parâmetro; Reflect.construct sem token ou com Symbol diferente não contorna a factory |
+| preserves cents with large values (3 casos) | Quantidade de dígitos 25/100/1000; strings de noves, transporte, empréstimo, cancelamento, negativos e centavo exato |
+| external Decimal configuration | Sem parâmetro; reduz precisão/faixa global do Decimal, demonstra que Money permanece exato e restaura configuração em finally |
+
+O loop do teste de imutabilidade só compara referências dos resultados. O loop
+de erros executa os três callbacks run e verifica o código de cada falha. No teste
+grande, String.repeat recebe uma contagem, nunca uma quantia monetária; resultados
+esperados são strings construídas independentemente da aritmética decimal.
+
+Durante a implementação, test.each interpretou arrays como listas de argumentos
+(inclusive um array vazio como callback com done). Corrigimos os casos envolvendo
+arrays usando objetos `{ amount }`/`{ input }`, garantindo que o valor inválido
+chegue intacto à factory. O import default funcionava no runtime Bun, mas não no
+typecheck NodeNext; usamos o export nomeado `{ Decimal }`, sem relaxar o strict.
+
+Referências: [API decimal.js](https://mikemcl.github.io/decimal.js/),
+[implementação/documentação oficial](https://github.com/MikeMcl/decimal.js).
+
+### Comandos e resultados observados nesta etapa
+
+Com Bun 1.4.3 no PATH e infraestrutura local disponível para as regressões:
+
+```bash
+bun install --frozen-lockfile
+bun test ./test/money.test.ts
+DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering bun run check
+bun run test:infra
+bun run test:orm
+bun run test:migrations
+```
+
+| Verificação | Resultado real |
+|---|---|
+| Instalação frozen | 168 instalações/169 pacotes verificados; sem alterações |
+| Money isolado | 73 passaram, 0 falharam; 167 expectativas |
+| check | Typecheck passou; 97 testes passaram, 0 falharam; build passou |
+| PostgreSQL | 2 passaram; inclui persistência após restart/recriação em banco descartável |
+| SQS | 4 passaram; inclui recebimento, ACK, redrive e restart/recriação |
+| ORM | 2 passaram; integração Nest/SQL e credencial restrita |
+| Migrations | 2 passaram; CLI, up/down/repetição e rollback do lote |
+
+Total de casos distintos na rodada completa: **107**, dos quais **73 são novos de
+Money**. A execução isolada de Money repete esses mesmos casos, não acrescenta 73
+à contagem. Money não usa banco ou mocks; as regressões de persistência/SQS usam
+os serviços reais em Docker. Não foi criada migration de domínio nesta etapa.
+
+Também executamos o exemplo com `bun --eval`, importando a classe compilada de
+`./dist/domain/money/money.js`. Resultados:
+
+```text
+100.00 BRL
+75.00 BRL
+{"amount":"115.50","currency":"BRL"}
+0.30 BRL
+```
+
+Isso verifica o mesmo exemplo na saída ESM do build, não apenas no TypeScript do
+test runner. Encerramos esta etapa em Money; o próximo item do plano é o modelo
+imutável de lançamento de ledger, antes da Wallet, sujeito a nova autorização.
