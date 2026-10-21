@@ -61,7 +61,7 @@ para containers; não é necessário para a execução local atual.
 | `bun run dev` | Reinicia ao alterar arquivos |
 | `bun run start` | Executa o entrypoint TypeScript com Bun |
 | `bun run typecheck` | Checa tipos de fontes e testes sem emitir JS |
-| `bun run test` | Executa 15 casos de configuração + 2 casos HTTP reais |
+| `bun run test` | Executa 24 casos de configuração/HTTP real; exige DATABASE_URL + PostgreSQL |
 | `bun run build` | Compila fontes em dist com checagem de tipos |
 | `bun run start:built` | Executa dist/main.js; exige build anterior |
 | `bun run check` | Typecheck, testes e build, nessa ordem; interrompe na primeira falha |
@@ -71,6 +71,8 @@ para containers; não é necessário para a execução local atual.
 | `bun run test:infra:postgres` | 2 testes reais; inclui restart/recriação PostgreSQL |
 | `bun run test:infra:sqs` | 4 testes reais; inclui drift, ACK, redrive e restart/recriação LocalStack |
 | `bun run test:infra` | Executa os dois grupos de infraestrutura sequencialmente |
+| `bun run test:orm` | Nest/SQL/permissões em banco descartável |
+| `bun run test:migrations` | Criação/up/down/repetição/falha transacional em bancos descartáveis |
 
 ## Diagnóstico de startup
 
@@ -195,3 +197,51 @@ DI, SQL, HTTP e recusa do papel admin. Não reinicia containers nem altera wager
 Os testes consultam credenciais locais no Compose; não exigem DATABASE_URL exportada.
 `bun run check` inclui HTTP real e exige DATABASE_URL válida + PostgreSQL disponível.
 Não executamos criação de schema nem migrations automaticamente no startup.
+
+## Migrations oficiais
+
+Instale dependências completas (`bun install --frozen-lockfile`), incluindo a CLI
+e o migrador em devDependencies. O job usa Bun e fontes TS, separado de dist/main.js.
+Defina MIGRATION_DATABASE_URL em `.env` ou no ambiente; a configuração não usa
+DATABASE_URL como fallback. Use somente a conexão de migration no job administrativo.
+
+```bash
+export MIGRATION_DATABASE_URL=postgresql://wager_admin:local_admin_only@127.0.0.1:55432/wagering
+bun run migration:create --name NomeDescritivo
+bun run migration:pending
+bun run migration:list
+```
+
+Create gera arquivo vazio em migrations: implemente/revise up/down e versione.
+Pending lista pendentes; list lista aplicadas. Esses comandos oficiais podem
+inicializar a tabela de histórico; não os trate como estritamente read-only.
+Não há migration de produção nesta entrega, nem foi aplicado DDL em wagering.
+
+Quando existir uma migration revisada para o alvo correto:
+
+```bash
+bun run migration:up
+bun run migration:down
+```
+
+Up aplica pendências; repetição usa histórico e não duplica aplicação. Down reverte
+a última migration e pode destruir dados: exercite no banco descartável antes de
+considerar qualquer reversão em ambiente com dados. Não use fresh/schema:update.
+Não execute dois jobs administrativos de migration simultaneamente; o job deve ser único.
+
+Para demonstrar sem tocar no banco principal:
+
+```bash
+bun run test:orm
+bun run test:migrations
+```
+
+Esses testes criam bancos dwp_test_<UUID> a partir de template0, usam credenciais
+locais do Compose, geram migrations em .tools e limpam somente esses recursos.
+A fixture recusa nomes de banco fora desse padrão. Não removem o volume principal.
+Uma falha no teste é propagada; se cleanup for impedido por indisponibilidade do
+banco, inspecione o banco de teste identificado antes de qualquer remoção manual.
+
+O diretório migrations deve conter só uma versão (TS) de cada arquivo. O glob
+Migration*.ts/js ignora README. Snapshots/diff automático estão desativados porque
+ainda não existem entidades mapeadas; SQL é escrito e revisado explicitamente.

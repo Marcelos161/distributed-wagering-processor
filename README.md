@@ -747,16 +747,20 @@ Teste de carga também conta como diferencial. Se fizer, exponha como `bun run t
 
 ---
 
-## Implementação do candidato — etapas 1 e 2
+## Implementação do candidato — etapas 1 a 3
 
 O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
 `GET /health/live`, PostgreSQL persistente e SQS FIFO/DLQ em LocalStack Community
-4.14.0, sem token. O processamento financeiro, MikroORM e migrations estão pendentes.
+4.14.0, sem token. MikroORM está integrado ao NestJS com papel restrito; CLI oficial
+de migrations configurada e validada em bancos descartáveis. O domínio financeiro
+e seu schema permanecem pendentes.
 
 Com Bun 1.4.3 disponível, execute na raiz:
 
 ```bash
 bun install --frozen-lockfile
+export DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering
+bun run infra:up
 bun run check
 bun run start
 ```
@@ -767,6 +771,8 @@ Infraestrutura local (Docker com Compose):
 bun run infra:up
 bun run infra:status
 bun run test:infra
+bun run test:orm
+bun run test:migrations
 ```
 
 Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute

@@ -25,7 +25,7 @@ genéricos. Locks pessimistas futuros usarão EM transacional; ainda não implem
 Evidência: Nest + SQL real + HTTP, schema vazio e DDL negado para app em banco
 descartável; credencial admin recusada. Nenhuma tabela criada no banco principal.
 
-Estado em 21/10/2026: **base NestJS e infraestrutura PostgreSQL/SQS implementadas**. Há decisões
+Estado em 21/10/2026: **NestJS, PostgreSQL/SQS, MikroORM e sistema de migrations implementados**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -60,7 +60,8 @@ aplicação; drenagem e visibilidade de mensagens ainda precisam ser implementad
 ## ADR-002 — Liveness e limite da etapa (adotada)
 
 `GET /health/live` é público e retorna `200 {"status":"ok"}` quando o processo
-consegue responder. Nenhum acesso a banco/fila ocorre. `/health/ready` ainda não
+consegue responder. Nenhum acesso a banco/fila ocorre nessa rota (o startup agora
+valida PostgreSQL pela ADR-006). `/health/ready` ainda não
 existe (404): a aplicação ainda não implementa probes das dependências.
 
 Alternativa rejeitada: readiness retornando 200 fixo. Isso permitiria encaminhar
@@ -100,7 +101,7 @@ O domínio não importa NestJS nem ORM. Aplicação coordena regras e persistên
 através de contratos; infraestrutura implementa esses contratos. HTTP e SQS
 chamam o mesmo caso de uso. Não se criam interfaces para cada classe sem necessidade.
 
-## ADR-003 — ORM, emulador e concorrência (aprovada; ORM/locks pendentes)
+## ADR-003 — ORM, emulador e concorrência (aprovada; locks pendentes)
 
 Em 21/10/2026, o usuário aprovou explicitamente a recomendação: **MikroORM,
 LocalStack e lock pessimista por carteira no PostgreSQL**.
@@ -168,10 +169,47 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Não existem domínio financeiro, migrations, idempotência, autenticação,
+Não existem domínio financeiro, migrations de schema financeiro, idempotência, autenticação,
 reconciliação, métricas ou testes distribuídos. Nenhuma garantia financeira foi
 demonstrada. Os testes reais de infraestrutura provam conexão, configuração,
-mensageria e persistência do PostgreSQL; não provam atomicidade financeira.
+mensageria, persistência PostgreSQL e rollback de migrations/transações de prova;
+não provam atomicidade financeira entre wallet, ledger, inbox e outbox.
+
+## ADR-007 — Migrations administrativas explícitas e testes isolados (adotada)
+
+CLI e Migrator oficiais 7.2.5, executados com Bun em job separado. Configuração raiz
+usa apenas MIGRATION_DATABASE_URL; runtime Nest usa apenas DATABASE_URL. Não há
+fallback de credenciais nem migração no startup. Dependências de migration são
+de desenvolvimento: job administrativo precisa de instalação completa e fontes TS;
+o runtime compilado não importa scripts de migration.
+
+Migrations versionadas em `/migrations`, glob Migration*.ts/js, histórico
+mikro_orm_migrations. Criação vazia por CLI oficial, SQL explícito revisado e up/down
+obrigatórios no processo de revisão. Não usamos diff automático enquanto não há
+entidades; snapshot=false evita estado auxiliar inútil. Alternativa futura de diff
+será avaliada com metadados reais. Não se executam schema:update/fresh.
+
+transactional=true, allOrNothing=true, disableForeignKeys=false: falha desfaz o
+lote. Operações não transacionais exigiriam desenho separado. Down reverte schema,
+mas não recupera dados removidos; histórico administrativo permanece vazio após
+reverter a última migration. Rastreabilidade usa nomes registrados e Git; não é
+checksum automático do conteúdo. Não editar migration aplicada. Jobs administrativos
+devem ser serializados; não afirmamos exclusão distribuída entre CLIs concorrentes.
+
+Testes criam bancos dwp_test_<UUID> com template0 via credencial administrativa já
+existente. Fixture recusa qualquer outro nome. Arquivos de prova são gerados em
+.tools e limpos em finally; nenhuma migration fictícia entra no diretório de produção.
+Cleanup remove só o banco criado pelo helper, sem apagar volume nem modificar
+tabelas em wagering. O teste antigo de persistência foi adaptado para usar esse
+isolamento. Restart/recriação ainda interrompe o serviço de teste, portanto esses
+testes de infraestrutura requerem ambiente ocioso.
+
+Evidência real: geração pela CLI; up e repetição com um único histórico; SELECT de
+schema independente; down e retorno à baseline; falha na segunda migration desfaz
+DDL de ambas e não deixa histórico aplicado. App pode SELECT/INSERT concedidos,
+mas não CREATE/DROP nem ler histórico administrativo. EM.transactional confirmou
+um INSERT e desfez outro quando callback lançou erro. Dump do schema wagering
+permaneceu igual e nenhum banco de teste sobrou após a execução.
 
 ## ADR-004 — PostgreSQL local persistente (adotada)
 

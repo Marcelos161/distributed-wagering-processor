@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
+import { SQL } from 'bun';
 import { compose, postgres } from './compose.js';
+import { withDisposableDatabase } from './disposable-database.js';
 
 test('PostgreSQL accepts authenticated application SQL without superuser privileges', async () => {
   const sql = await postgres('app');
@@ -15,30 +17,25 @@ test('PostgreSQL accepts authenticated application SQL without superuser privile
 });
 
 test('PostgreSQL preserves a committed record across restart and container recreation', async () => {
-  const table = `infra_probe_${crypto.randomUUID().replaceAll('-', '')}`;
-  const marker = crypto.randomUUID();
-  let sql = await postgres('admin');
-  try {
-    await sql.unsafe(`CREATE TABLE ${table} (marker text NOT NULL)`);
-    await sql.unsafe(`INSERT INTO ${table} (marker) VALUES ($1)`, [marker]);
-    await sql.close();
-
-    await compose('restart', 'postgres');
-    await compose('up', '-d', '--wait', '--wait-timeout', '90', 'postgres');
-    sql = await postgres('admin');
-    expect((await sql.unsafe(`SELECT marker FROM ${table}`))[0]?.marker).toBe(marker);
-    await sql.close();
-
-    await compose('up', '-d', '--force-recreate', '--wait', '--wait-timeout', '90', 'postgres');
-    sql = await postgres('admin');
-    expect((await sql.unsafe(`SELECT marker FROM ${table}`))[0]?.marker).toBe(marker);
-  } finally {
-    await sql.close();
-    const cleanup = await postgres('admin');
+  await withDisposableDatabase(async (urls) => {
+    const marker = crypto.randomUUID();
+    let sql = new SQL(urls.migrations);
     try {
-      await cleanup.unsafe(`DROP TABLE IF EXISTS ${table}`);
+      await sql`CREATE TABLE infrastructure_probe (marker text NOT NULL)`;
+      await sql`INSERT INTO infrastructure_probe (marker) VALUES (${marker})`;
+      await sql.close();
+
+      await compose('restart', 'postgres');
+      await compose('up', '-d', '--wait', '--wait-timeout', '90', 'postgres');
+      sql = new SQL(urls.migrations);
+      expect((await sql`SELECT marker FROM infrastructure_probe`)[0]?.marker).toBe(marker);
+      await sql.close();
+
+      await compose('up', '-d', '--force-recreate', '--wait', '--wait-timeout', '90', 'postgres');
+      sql = new SQL(urls.migrations);
+      expect((await sql`SELECT marker FROM infrastructure_probe`)[0]?.marker).toBe(marker);
     } finally {
-      await cleanup.close();
+      await sql.close();
     }
-  }
+  });
 }, 120_000);

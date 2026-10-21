@@ -13,12 +13,12 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após infraestrutura
+## Comparação com o README — atualização após MikroORM e migrations
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
-| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers reais, FIFO/DLQ e persistência PG validados; ORM/migrations pendentes | MikroORM e migrations up/down |
+| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Schema financeiro e constraints futuros |
 | Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Pendente | Testes unitários e schema |
 | BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Pendente | Fluxos de negócio e reversões |
 | Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
@@ -39,7 +39,7 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 |---|---|---|
 | 1 | `chore: initialize NestJS project with Bun` | Concluída: base HTTP, configuração estrita, teste real, build e guias |
 | 2 | `chore: configure PostgreSQL and LocalStack` | Concluída em dois commits: PostgreSQL persistente e SQS FIFO/DLQ, com testes reais de reinício/recriação |
-| 3 | `chore: configure MikroORM and reversible migrations` | EntityManager por operação e conexão; migration inicial up/down em banco descartável |
+| 3 | `chore: configure MikroORM and reversible migrations` | Concluída em commits de integração Nest e migrations; demonstrações apenas em bancos descartáveis |
 | 4 | `feat: implement immutable Money value object` | Decimal exato, escala e moedas; entradas inválidas, aritmética, imutabilidade e serialização |
 | 5 | `feat: implement immutable wallet ledger entries` | Factory, rehydrate e equação antes/depois; sem mutação |
 | 6 | `feat: implement Wallet aggregate` | Abertura/debit/credit, version, saldo e ledger inseparáveis; testes de invariantes |
@@ -93,7 +93,7 @@ auditável; PostgreSQL/SQS completamente substituídos por mocks.
 
 Em 21/10/2026, o usuário aprovou **MikroORM + LocalStack + lock pessimista por
 carteira no PostgreSQL**. Essas escolhas orientam as etapas 2, 3 e 13;
-a infraestrutura da etapa 2 foi validada; ORM e locks permanecem pendentes. A decisão e as alternativas
+a infraestrutura das etapas 2 e 3 foi validada; locks financeiros permanecem pendentes. A decisão e as alternativas
 estão na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md).
 
 Antes de Money/regras financeiras, fechar escala de entrada, valor zero, limites

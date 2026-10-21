@@ -21,6 +21,12 @@
     "test:infra:sqs": "bun test ./infra/test/sqs.test.ts",
     "test:infra": "bun run test:infra:postgres && bun run test:infra:sqs",
     "test:orm": "bun test ./infra/test/orm.test.ts",
+    "test:migrations": "bun test ./infra/test/migrations.test.ts",
+    "migration:create": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:create --blank --config mikro-orm.config.ts",
+    "migration:up": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:up --config mikro-orm.config.ts",
+    "migration:down": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:down --config mikro-orm.config.ts",
+    "migration:pending": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:pending --config mikro-orm.config.ts",
+    "migration:list": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:list --config mikro-orm.config.ts",
     "check": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {

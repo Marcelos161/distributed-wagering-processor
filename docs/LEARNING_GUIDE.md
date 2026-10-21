@@ -736,3 +736,148 @@ O teste HTTP existente agora também inicializa ORM real e exige DATABASE_URL.
 Referências: [integração Nest](https://mikro-orm.io/docs/usage-with-nestjs),
 [transações](https://mikro-orm.io/docs/transactions),
 [compatibilidade v7](https://mikro-orm.io/docs/upgrading-v6-to-v7).
+
+## 11. Migrations oficiais: criação, histórico, aplicação e reversão
+
+### Migration não é transação SQL
+
+Uma **migration** é uma mudança versionada da estrutura ou dos dados: arquivo com
+nome único e métodos `up` e `down`. Ela responde: qual mudança este ambiente recebeu?
+Uma **transação SQL** é o limite de atomicidade: BEGIN, operações, COMMIT ou ROLLBACK.
+Ela responde: estas operações foram confirmadas juntas? Uma migration pode executar
+numa transação. Uma aposta futura também usará transação, mas não será uma migration.
+
+O migrador compara arquivos com a tabela `mikro_orm_migrations`. `up` executa
+pendências em ordem e registra sucesso; reaplicar pula nomes já registrados.
+`down` reverte a última migration por padrão e remove seu registro. O controle é
+por nome, não uma prova criptográfica do conteúdo: não edite migrations aplicadas;
+versione no Git e acrescente correções novas.
+
+`transactional=true` protege cada migration; `allOrNothing=true` mantém o lote numa
+transação mestre. Se uma instrução falha, desfaz o lote sem registrar sucesso parcial.
+`disableForeignKeys=false` mantém constraints ativas. CREATE INDEX CONCURRENTLY,
+por exemplo, exigiria decisão separada porque não cabe nesse modelo transacional.
+
+**Down não é backup:** remover uma tabela remove seus dados. O teste compara o
+schema antes/depois, não restaura dados apagados. A tabela administrativa do migrador
+permanece vazia depois de down; a linha de base é capturada após inicializar esse controle.
+
+### Escolhas e estrutura
+
+Usamos `@mikro-orm/migrations` e `@mikro-orm/cli` oficiais 7.2.5 em devDependencies.
+O job de migration instala essas dependências e executa TypeScript com Bun. O
+servidor compilado não importa nem executa o migrador. A pasta
+[migrations](../migrations/README.md) está preparada, sem tabelas fictícias.
+
+`migration:create` gera arquivo **vazio** para SQL explícito e revisado. A alternativa
+é diff automático de entidades; com registro de entidades vazio, esse diff poderia
+propor remoções indevidas. Não o usamos nesta etapa; snapshots também estão desativados.
+Quando houver entidades reais, geração por diff poderá ser avaliada, mantendo revisão
+de up/down e testes de constraints. Não usamos schema:update/fresh.
+
+### Configuração e funções
+
+| Arquivo/função | Contrato, fluxo, chamadores e erros |
+|---|---|
+| [mikro-orm.config.ts](../mikro-orm.config.ts) | Sem função própria; exporta createMigrationOptions(readDatabaseUrl(process.env,'migrations')). Importada pela CLI. Exige MIGRATION_DATABASE_URL; não consulta DATABASE_URL. Importar configuração não aplica migrations |
+| [migration-options.ts](../scripts/migration-options.ts), `createMigrationOptions(clientUrl,path)` | URL string e caminho opcional → opções PostgreSQL. Reutiliza createOrmOptions, registra Migrator, configura path/pathTs, glob Migration*.ts/js, tabela histórica e políticas transacionais. Caminho padrão absoluto via fileURLToPath; testes passam pasta temporária. Não abre conexão; erros de conexão/discovery surgem ao inicializar ORM |
+| [fixture migration-config.ts](../infra/test/fixtures/migration-config.ts) | Sem função própria; lê URL, exige nome `/dwp_test_` + 32 caracteres hexadecimais e DWP_TEST_MIGRATIONS_PATH. Exporta opções de migration; recusa explicitamente wagering/outros bancos. Usada só por subprocessos de teste |
+| [migrations.test.ts](../infra/test/migrations.test.ts), `migrationCli(url,path,command,...args)` | Strings → Promise<string> stdout. Bun.spawn usa process.execPath (Bun), CLI oficial e fixture; recebe URL/path no ambiente do subprocesso. Lê stdout/stderr/exit em paralelo. Exit não zero lança Error para o teste. Não modifica process.env global nem interpola shell |
+
+path e pathTs apontam ao mesmo diretório porque o job usa TS diretamente; o build
+do servidor compila apenas src. Não misture JS e TS da mesma migration na pasta.
+Testes escrevem em `.tools/`, ignorado no Git, para resolver pacotes do projeto.
+Finally remove somente o diretório temporário que cada cenário acabou de criar.
+
+### Cada método das migrations de demonstração
+
+O teste chama a CLI oficial `migration:create --blank --name InfrastructureProbe`,
+encontra arquivo/classe gerados e preenche a classe temporária:
+
+```ts
+override async up(): Promise<void> {
+  this.addSql('CREATE TABLE infrastructure_probe (id text PRIMARY KEY)');
+  this.addSql('GRANT SELECT, INSERT ON infrastructure_probe TO wager_app');
+}
+override async down(): Promise<void> {
+  this.addSql('DROP TABLE infrastructure_probe');
+}
+```
+
+Os métodos não recebem argumentos, retornam Promise<void> e são chamados pelo
+migrador. `addSql` enfileira instruções no runner, não confirma separadamente.
+Up cria tabela e grants mínimos; down remove tabela/grants. Erros SQL provocam
+rollback. A classe herda Migration sem construtor próprio. `override` verifica
+que o método existe na classe base. Nada disso vai à pasta de produção.
+
+O cenário de falha gera outras duas classes temporárias:
+
+- `Migration20990101000001.up`: CREATE TABLE batch_probe; `down`: DROP dessa tabela.
+- `Migration20990101000002.up`: CREATE TABLE failure_probe e depois SELECT 1/0;
+  `down`: DROP dessa tabela.
+
+Todos esses métodos são async/Promise<void>, sem parâmetros, executados pelo runner
+no banco isolado. A divisão por zero acontece depois do DDL, demonstrando rollback
+de mudança já executada. Números dos nomes servem para ordem determinística do teste.
+
+### Testes passo a passo
+
+Callbacks de `test`: sem parâmetros → Promise<void>, chamados pelo Bun. Callbacks
+`run` do helper recebem `{application,migrations}` → Promise<void>. Falhas propagam
+e os blocos finally fecham conexões/removem apenas recursos descartáveis.
+
+**1. Criação, aplicação, repetição, permissões e reversão (timeout 60s):**
+
+1. Cria pasta e banco UUID; abre conexão SQL administrativa independente do ORM.
+2. CLI create gera arquivo. Callback `find(name)` retorna boolean para localizar TS;
+   regex extrai classe. Falta de arquivo/classe lança erro explícito.
+3. Preenche up/down; CLI list inicializa histórico; SELECT pg_tables captura baseline.
+4. Pending deve listar classe; up deve criar tabela e uma linha de histórico,
+   confirmadas por SQL direto. List deve mostrar a migration aplicada.
+5. Novo up mantém uma linha, sem duplicar CREATE TABLE.
+6. Conecta MikroORM como app. Callback `transactional(transaction)` insere
+   `committed` usando o EM transacional; retorno normal confirma a operação.
+7. Segundo callback transacional insere `rolled-back` e lança erro; SQL direto
+   encontra só `committed`. As callbacks recebem EntityManager e retornam Promise<void>.
+8. App tenta DROP, CREATE e SELECT do histórico: todos devem falhar por permissões.
+   Isso complementa o INSERT permitido; a credencial admin não é necessária à app.
+9. Fecha ORM, executa down, compara pg_tables à baseline e exige histórico vazio.
+10. Fecha SQL, remove banco descartável e pasta temporária em finally.
+
+**2. Falha dentro do lote (timeout 30s):**
+
+1. Cria pasta, duas classes de falha e novo banco isolado.
+2. CLI up deve falhar com division by zero na segunda migration.
+3. SQL direto exige ausência de batch_probe e failure_probe e zero linhas históricas.
+4. Pending ainda lista a primeira. Isso prova rollback inclusive da migration
+   anterior que havia executado sem erro. Finally fecha SQL e remove os recursos.
+
+### Atualizações dos testes anteriores
+
+[postgres.test.ts](../infra/test/postgres.test.ts) agora usa withDisposableDatabase:
+o callback run cria infrastructure_probe, grava UUID parametrizado e verifica
+persistência após restart/recriação com novas conexões ao banco descartável.
+Finally fecha SQL; o helper remove o banco. Nenhuma tabela é criada/apagada em
+wagering. Restart do serviço interrompe clientes: execute em ambiente ocioso.
+
+[orm.test.ts](../infra/test/orm.test.ts) moveu createApplication para dentro de try;
+restaura DATABASE_URL num finally aninhado, mesmo se criação/fechamento falhar.
+
+### Evidência observada
+
+| Verificação | Resultado |
+|---|---|
+| `bun run test:orm` | 2 passaram, 0 falharam, 7 expectativas |
+| `bun run test:migrations` | 2 passaram, 0 falharam, 17 expectativas, cerca de 2s |
+| `bun run test:infra` | 2 PostgreSQL e 4 SQS passaram, inclusive restart/recriação |
+| `DATABASE_URL=... bun run check` | 24 testes passaram; typecheck e build passaram |
+| Scripts raiz list/pending/up/down com banco descartável | Todos exit 0, pasta de migrations de produção vazia |
+| `bun dist/main.js`, sonda HTTP real | 200 e encerramento por SIGTERM |
+| Startup compilado com URL administrativa/ausente | Ambas recusadas com exit 1 e erro específico |
+| Schema principal antes/depois (`pg_dump --schema-only`) | Igual, desconsiderando somente os delimitadores aleatórios restrict/unrestrict do dump |
+| Consulta final de bancos `dwp_test_%` | Nenhum banco de teste restante |
+
+O smoke compilado e os scripts raiz foram sondas adicionais fora da contagem Bun.
+Nenhuma migration foi aplicada em wagering. A tabela de controle histórico permanece
+após down; os dados da tabela removida não são recuperáveis por esse mecanismo.
+Referência: [migrations MikroORM](https://mikro-orm.io/docs/migrations).
