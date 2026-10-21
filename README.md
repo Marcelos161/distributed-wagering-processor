@@ -747,10 +747,11 @@ Teste de carga também conta como diferencial. Se fizer, exponha como `bun run t
 
 ---
 
-## Implementação do candidato — etapa 1
+## Implementação do candidato — etapas 1 e 2
 
-O enunciado acima foi preservado. Atualmente há apenas a base NestJS/Bun,
-TypeScript estrito e `GET /health/live`; o processamento financeiro está pendente.
+O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
+`GET /health/live`, PostgreSQL persistente e SQS FIFO/DLQ em LocalStack Community
+4.14.0, sem token. O processamento financeiro, MikroORM e migrations estão pendentes.
 
 Com Bun 1.4.3 disponível, execute na raiz:
 
@@ -759,6 +760,20 @@ bun install --frozen-lockfile
 bun run check
 bun run start
 ```
+
+Infraestrutura local (Docker com Compose):
+
+```bash
+bun run infra:up
+bun run infra:status
+bun run test:infra
+```
+
+Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute
+com as filas vazias e sem aplicação/worker usando o ambiente. O volume PostgreSQL
+é preservado. LocalStack é descartável: filas são reprovisionadas, mensagens
+pendentes não sobrevivem ao restart do emulador. `bun run infra:down` preserva o
+volume PostgreSQL. Consulte os detalhes e comandos no setup abaixo.
 
 - [Instalação, configuração e comandos](docs/SETUP.md)
 - [Auditoria, requisitos pendentes e plano de commits](docs/IMPLEMENTATION_PLAN.md)

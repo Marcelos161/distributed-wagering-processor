@@ -1,6 +1,6 @@
 # Arquitetura e registro de decisões
 
-Estado em 21/10/2026: **base NestJS e infraestrutura PostgreSQL implementadas**. Há decisões
+Estado em 21/10/2026: **base NestJS e infraestrutura PostgreSQL/SQS implementadas**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -75,7 +75,7 @@ O domínio não importa NestJS nem ORM. Aplicação coordena regras e persistên
 através de contratos; infraestrutura implementa esses contratos. HTTP e SQS
 chamam o mesmo caso de uso. Não se criam interfaces para cada classe sem necessidade.
 
-## ADR-003 — ORM, emulador e concorrência (aprovada; implementação pendente)
+## ADR-003 — ORM, emulador e concorrência (aprovada; ORM/locks pendentes)
 
 Em 21/10/2026, o usuário aprovou explicitamente a recomendação: **MikroORM,
 LocalStack e lock pessimista por carteira no PostgreSQL**.
@@ -143,9 +143,10 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Não existem domínio financeiro, migrations, filas, idempotência, autenticação,
+Não existem domínio financeiro, migrations, idempotência, autenticação,
 reconciliação, métricas ou testes distribuídos. Nenhuma garantia financeira foi
-demonstrada. O teste HTTP real desta etapa não substitui as integrações exigidas.
+demonstrada. Os testes reais de infraestrutura provam conexão, configuração,
+mensageria e persistência do PostgreSQL; não provam atomicidade financeira.
 
 ## ADR-004 — PostgreSQL local persistente (adotada)
 
@@ -164,6 +165,63 @@ Scripts de init só executam sobre volume vazio. Alterar a senha no Compose não
 migra a credencial persistida; essa alteração requer ALTER ROLE explícito.
 O cliente SQL Bun aparece apenas nos testes de infraestrutura, não na persistência
 da aplicação: a escolha de MikroORM permanece válida.
+
+## ADR-005 — SQS local sem credenciais de conta (adotada)
+
+**Decisão aprovada pelo usuário em 21/10/2026:** usar LocalStack Community anterior,
+sem token. A imagem escolhida é `localstack/localstack:4.14.0`, fixada pelo digest
+registrado no Compose. Versões atuais exigem token de conta, conforme o
+[anúncio oficial](https://blog.localstack.cloud/localstack-single-image-next-steps/).
+Alternativas discutidas: LocalStack atual autenticado ou reavaliar MiniStack.
+Esta imagem é antiga e não recebe automaticamente atualizações; a fixação torna
+a execução reproduzível, mas exige revisão deliberada para futuras atualizações.
+
+O container habilita somente SQS, expõe 4566 em loopback e usa `test/test` como
+identidade AWS fictícia. Não recebe token LocalStack, perfil AWS do host, credenciais
+reais ou socket Docker. `SQS_ENDPOINT_STRATEGY=dynamic` produz URLs acessíveis a
+partir do hostname utilizado pelo cliente, tanto no host quanto na rede Compose.
+
+**Ciclo de vida:** `PERSISTENCE=0`. O emulador é descartável: filas/configuração são
+reconstruídas pelo hook `ready.d` a cada início. Mensagens pendentes são perdidas
+ao reiniciar/recriar o LocalStack. Essa limitação não afeta a persistência PostgreSQL
+e não deve ser confundida com durabilidade de SQS real. Nos testes futuros de crash
+da aplicação, manter o broker em execução; não usar restart do emulador como prova
+de recuperação de mensagens. Persistência do broker exigiria outra decisão explícita.
+
+**Provisionamento:** `queues.json` define o estado desejado. O script Python utiliza
+boto3 já incluído na imagem; não instala ferramentas em startup. Cria a DLQ primeiro,
+depois a origem, consulta os ARNs e aplica atributos mutáveis. Reexecução obtém as
+filas existentes e reconcilia atributos sem delete/purge. FifoQueue é imutável: o
+script valida esse atributo e falha se incompatível. Modo `check` só lê e é usado no
+healthcheck; falha se o broker não responder, uma fila faltar ou atributos divergirem.
+Não há marcador de sucesso obsoleto que possa tornar o container falsamente healthy.
+
+| Parâmetro | Escolha e justificativa |
+|---|---|
+| Filas | `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, ambas FIFO, como exige o README |
+| ContentBasedDeduplication | false: produtor informa MessageDeduplicationId explicitamente; não esconder identidades de negócio num hash automático de corpo |
+| VisibilityTimeout | 30s iniciais; deve superar duração normal do processamento. Futuro worker poderá renovar/alterar por mensagem. Não é deadline de transação SQL |
+| ReceiveMessageWaitTimeSeconds | 20s: long polling reduz consultas vazias. Testes sobrescrevem apenas o tempo de espera da requisição |
+| maxReceiveCount | 5: permite falhas transitórias sem retry ilimitado. Após 5 entregas sem DeleteMessage, próxima tentativa de entrega direciona à DLQ |
+| Retenção origem/DLQ | 345600s (4 dias) / 1209600s (14 dias): mais tempo para diagnóstico na DLQ. Retenção ativada no emulador; expiração em dias não foi ensaiada |
+| RedriveAllowPolicy | byQueue, somente ARN da origem; limita qual fila pode usar essa DLQ |
+
+Visibility timeout permite reentrega; o broker não implementa sozinho nosso futuro
+backoff exponencial de negócio. FIFO ordena por MessageGroupId, não globalmente;
+produtores financeiros deverão usar walletId como grupo. Deduplicação do broker
+tem janela limitada e não substitui Inbox nem idempotência SQL. Encaminhar à DLQ
+libera um grupo e pode quebrar a sequência completa de operações; validação de
+referências fora de ordem permanece requisito da aplicação.
+
+**Evidência:** 4 testes Bun com SDK AWS e LocalStack reais: reconciliação de drift
+e reexecução preservando mensagem; invisibilidade/reentrega/ACK; movimento efetivo
+à DLQ; restart e recriação seguidos de nova troca de mensagens. O SDK está em
+devDependencies, usado somente pelo teste; nenhum worker definitivo foi implementado.
+
+Referências: [hooks LocalStack](https://docs.localstack.cloud/aws/customization/advanced/initialization-hooks/),
+[URLs e retenção SQS local](https://docs.localstack.cloud/aws/services/sqs/),
+[visibility timeout AWS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html),
+[DLQ AWS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html).
 
 ## Referências consultadas na base
 

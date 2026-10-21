@@ -427,3 +427,191 @@ Referências: [Compose](https://docs.docker.com/reference/compose-file/services/
 [volumes](https://docs.docker.com/reference/compose-file/volumes/),
 [imagem PostgreSQL](https://hub.docker.com/_/postgres),
 [cliente SQL Bun usado somente nos testes](https://bun.sh/docs/runtime/sql).
+
+## 9. Infraestrutura SQS: FIFO, DLQ, provisionamento e recuperação de configuração
+
+### Problema e decisão aprovada
+
+Precisamos exercitar uma API de fila de verdade, com mensagens, reentregas e ACK,
+sem usar conta ou credenciais AWS reais. **LocalStack** é um emulador que atende
+requisições compatíveis com APIs AWS dentro de um container. O SDK/CLI envia HTTP
+para ele, em vez de enviá-lo à AWS. Emulação não equivale a demonstrar comportamento
+em produção AWS; divergências devem ser tratadas quando aparecerem.
+
+As versões atuais do LocalStack exigem token. O usuário aprovou Community **4.14.0**,
+fixada por digest, sem token. Alternativas apresentadas: versão atual com conta ou
+reavaliar MiniStack. A escolha antiga evita credenciais externas, mas não recebe
+atualizações automaticamente. A ADR-005 registra essa decisão e seus limites.
+
+Nesta configuração, **somente PostgreSQL tem persistência de dados**. LocalStack
+está com PERSISTENCE=0: no restart, o hook recria as filas e os atributos, mas
+mensagens pendentes desaparecem. Reexecutar o provisionador com o container vivo
+preserva mensagens; reiniciar o emulador não. Essa diferença foi documentada
+explicitamente para não confundir configuração reproduzível com broker durável.
+
+### Fila normal, FIFO e DLQ
+
+| Tipo | Comportamento e aplicação |
+|---|---|
+| Standard (normal) | Entrega pelo menos uma vez, duplicatas possíveis e ordem por melhor esforço |
+| FIFO | Ordena dentro de cada MessageGroupId e oferece deduplicação por janela limitada; grupos diferentes podem avançar independentemente |
+| DLQ | Papel de uma fila que recebe mensagens que excederam o limite de entregas sem remoção; neste projeto também é FIFO |
+
+Para apostas futuras, MessageGroupId será walletId. Usar um grupo global limitaria
+o paralelismo de todas as carteiras. MessageDeduplicationId identifica o envio para
+deduplicação do broker; `messageId` do envelope e a idempotency key de negócio têm
+papéis diferentes. FIFO não substitui os registros persistentes de Inbox/transação.
+
+### Como uma mensagem percorre a infraestrutura
+
+1. O produtor chama **SendMessage**, informando QueueUrl, corpo, grupo e dedup ID.
+2. **ReceiveMessage** entrega corpo e **ReceiptHandle**. A mensagem ainda está na fila.
+3. Durante o **visibility timeout**, a mensagem fica temporariamente invisível.
+   Se o processo morrer antes de confirmar, ela pode ser recebida novamente.
+4. Após concluir o processamento, o consumidor chama **DeleteMessage** com o handle
+   daquele recebimento. Isso é nosso ACK no SQS. No worker financeiro futuro, ocorrerá
+   somente depois do commit SQL; nenhum processamento financeiro existe nesta etapa.
+5. Sem DeleteMessage, a mensagem volta após a visibilidade expirar. Isso permite
+   **retry**: nova tentativa. **Backoff** é a política de espaçar essas tentativas;
+   o backoff exponencial definitivo pertence ao futuro worker, não a este script.
+6. A **redrive policy** da origem aponta o ARN da DLQ e maxReceiveCount=5. Depois
+   de cinco recebimentos sem remoção, a mensagem é redirecionada à DLQ ao tentar
+   nova entrega. Ela fica disponível para diagnóstico; não é sucesso de negócio.
+
+Não há garantia absoluta de ausência de duplicatas pelo visibility timeout. Uma
+operação demorada poderá exigir renovação de visibilidade e continuará necessitando
+de idempotência. Remover uma mensagem para DLQ também pode interromper a sequência
+original do grupo; o domínio deverá tratar dependências fora de ordem.
+
+### Atributos escolhidos
+
+| Atributo | Valor | Justificativa |
+|---|---|---|
+| FifoQueue | true em ambas | Exigência do desafio; atributo imutável após criação |
+| ContentBasedDeduplication | false | Exige dedup ID explícito; evita esconder duplicatas pelo corpo automaticamente |
+| VisibilityTimeout | 30 segundos | Ponto inicial para operações curtas; ajustar/renovar quando houver worker e medidas reais |
+| ReceiveMessageWaitTimeSeconds | 20 segundos | Long polling: servidor aguarda mensagem antes de responder vazio; reduz consultas ociosas |
+| MessageRetentionPeriod origem | 345600 segundos (4 dias) | Prazo inicial de processamento local |
+| MessageRetentionPeriod DLQ | 1209600 segundos (14 dias) | Mais tempo para inspecionar falhas; expiração em dias não foi validada por espera real |
+| RedrivePolicy | ARN da DLQ + maxReceiveCount=5 | Tentativas limitadas, sem redirecionar por uma única falha transitória |
+| RedriveAllowPolicy | byQueue + ARN da origem | Somente a fila obrigatória pode usar essa DLQ |
+
+ARN é o identificador do recurso (`arn:aws:sqs:região:conta:nome`); QueueUrl é o
+endereço HTTP utilizado nas operações. Conta local fictícia: `000000000000`.
+
+### Propriedades adicionadas ao Compose
+
+`localstack.image` fixa Community 4.14.0 por digest. `SERVICES=sqs` limita o emulador
+ao serviço necessário. `AWS_DEFAULT_REGION` organiza os recursos; credenciais
+`test/test` são fictícias e explícitas. Não são carregados perfis AWS do host.
+
+`SQS_ENDPOINT_STRATEGY=dynamic` usa o endereço pedido pelo cliente na QueueUrl:
+`127.0.0.1:4566` funciona no host; `localstack:4566` funciona na rede Compose.
+`LOCALSTACK_HOST=localstack:4566` configura o hostname interno anunciado pelo emulador.
+`SQS_ENABLE_MESSAGE_RETENTION_PERIOD=1` ativa retenção; PERSISTENCE=0 explicita o
+ciclo descartável. A porta publicada é loopback; somente 4566 é publicada no host,
+mesmo que `docker compose ps` mostre outras portas internas declaradas pela imagem.
+
+Um bind mount somente leitura disponibiliza scripts/JSON em `/opt/dwp-sqs`.
+Outro coloca o hook em `/etc/localstack/init/ready.d`, executado quando o serviço
+AWS estiver pronto. Healthcheck executa Python em modo `check`, a cada 5s, timeout
+10s, até 18 falhas consecutivas e aquecimento de 20s. Ele verifica configuração,
+não apenas porta aberta. `up --wait` usa essa saúde para concluir ou falhar.
+Não há volume de dados para LocalStack nem montagem do Docker socket.
+
+### Scripts e funções de provisionamento
+
+[queues.json](../infra/localstack/queues.json) é o estado desejado versionado, sem
+funções. Contém nomes, atributos e limite de recebimentos. Políticas dependentes
+de ARN são construídas depois de descobrir as filas.
+
+[10-init-sqs.sh](../infra/localstack/10-init-sqs.sh) não recebe argumentos; usa
+`set -eu` e `exec python3 ... apply`. Retorna o exit status do Python. `exec`
+substitui o processo shell, propagando falha. É chamado pelo LocalStack no estágio
+ready; depende apenas dos recursos já presentes na imagem. Não instala pacotes.
+
+[provision.py](../infra/localstack/provision.py) usa Python/boto3 incluídos no
+emulador; essa escolha evita outro container ou instalação em startup. Bun continua
+sendo o runtime, gerenciador e test runner da aplicação TypeScript.
+
+| Função | Parâmetros/retorno | Lógica, chamadores, dependências e falhas |
+|---|---|---|
+| `ensure_queue` | cliente boto3 + `spec: dict` → URL string | Chamada por main em apply; consulta URL; cria somente se o código AWS indicar fila inexistente; lê FifoQueue e rejeita incompatibilidade. Outros ClientErrors propagam. Nunca apaga fila para corrigir erro |
+| `expected_attributes` | spec dict + source_arn/dlq_arn strings → dict | Chamada por main; copia atributos sem modificar spec, acrescenta RedrivePolicy na origem e RedriveAllowPolicy na DLQ usando json.dumps. Depende de JSON; chaves ausentes falham explicitamente |
+| `normalized` | key/value strings → string ou objeto JSON | Chamada nas comparações; atributos simples continuam strings; políticas são parseadas e maxReceiveCount vira inteiro. Isso evita considerar ordem das chaves ou representação `5`/`"5"` como drift. JSON inválido falha |
+| `main` | mode string → None | Valida apply/check, lê spec relativo ao arquivo, cria cliente no loopback do container com test/test e timeouts. Resolve DLQ e origem, consulta ARNs, monta atributos. Em apply atualiza atributos mutáveis; em ambos compara atributos atuais com esperados e imprime JSON de sucesso. Divergência, rede, JSON ou modo inválido propagam exceção e exit não zero |
+
+O bloco `if __name__ == '__main__'` chama main com argv[1], ou apply por padrão.
+No healthcheck o argumento é explicitamente check. Esse modo não cria filas nem
+altera atributos. Falha do hook não é ocultada: sem topologia correta, healthcheck
+também falha. `connect_timeout=2`, `read_timeout=2` e retry limitado evitam espera
+indefinida por tentativa. O loop é DLQ → origem para resolver o destino antes da origem.
+
+Exemplo: aplicar com VisibilityTimeout alterado para 7 restaura 30. Chamar check
+antes de restaurar lança `unexpected attribute VisibilityTimeout`. Se a fila já
+contiver uma mensagem, apply não remove essa mensagem.
+
+### Funções e testes TypeScript do SQS
+
+[sqs.test.ts](../infra/test/sqs.test.ts) utiliza o SDK AWS real, instalado como
+devDependency. Todas as funções abaixo retornam Promises; erros de transporte e
+expectativas são propagados ao Bun runner, sem conversão para sucesso.
+
+| Função | Entrada → retorno | Passos, dependências e chamadores |
+|---|---|---|
+| `sqs` | Nenhuma → SQSClient | Lê config Compose pelo helper da seção 8; monta endpoint loopback/porta publicada, região e test/test; limita retries SDK a 2. Chamado por cada teste; não consulta credenciais reais |
+| `queues` | SQSClient → objeto source/dlq de URLs | Duas GetQueueUrl pelos nomes obrigatórios; URL ausente lança Error. Chamado por validação, precondição e testes |
+| `attributes` | cliente, URL string → mapa de strings | GetQueueAttributes All; ausência de Attributes lança Error. Usado por verifyTopology/requireEmpty |
+| `verifyTopology` | cliente → void | Resolve URLs, consulta ambas, exige FIFO, dedup explícita, timeout/polling/retenção e políticas com ARNs corretos. Valores esperados independentes do provisionador detectam config errada. Usado antes/depois de reaplicação e reinícios |
+| `requireEmpty` | cliente → void | Verifica contagens visível/em processamento/atrasada em ambas. Qualquer valor diferente de zero lança Error. Não purga mensagens. Precondição dos testes; ambiente deve estar ocioso porque contadores são aproximados |
+| `sendProbe` | cliente, URL → corpo string | Gera UUID, cria JSON InfrastructureProbe e envia com grupo/dedup únicos. Retorna corpo para comparação. Chamado pelos testes; não cria uma aposta |
+| `receive` | cliente, URL, wait number=1 → Message ou undefined | ReceiveMessage com máximo 1, long polling configurável e contador de recebimentos. Vazio retorna undefined. Chamado pelos testes; mantém visibility timeout padrão da fila |
+| `acknowledge` | cliente, URL, Message ou undefined, corpo esperado → void | Confere corpo antes de remover; exige ReceiptHandle e chama DeleteMessage. Não confirma mensagem diferente da prova. Chamado após recebimento e na DLQ |
+
+Cada callback de `test` abaixo não recebe parâmetros, retorna Promise<void>, cria
+cliente por sqs e chama `client.destroy()` em finally. O SDK destroy fecha recursos
+HTTP locais; não remove filas nem mensagens. Dependem de Docker e LocalStack reais.
+
+1. **Provisionamento:** exige filas vazias, valida atributos, envia prova, altera
+   visibility para 7; espera check falhar e em finally reaplica configuração. Aplica
+   novamente, verifica as mesmas URLs/atributos e recebe/remove a prova. Detecta
+   healthcheck superficial, drift não corrigido e bootstrap destrutivo. Timeout 30s.
+2. **Recebimento/ACK:** envia, recebe com contador 1, confirma invisibilidade numa
+   segunda consulta, muda visibilidade dessa mensagem para zero, recebe contador 2,
+   remove com novo handle e verifica vazio. Detecta remoção prematura ou falta de
+   reentrega; não espera 30s porque usa a API de mudança de visibilidade. Timeout 15s.
+3. **Redrive:** envia, recebe cinco vezes, verifica corpo/contador e devolve
+   visibilidade a zero a cada vez. A próxima consulta da origem não entrega; consulta
+   DLQ, verifica corpo e remove com handle da DLQ. Detecta policy que só parece
+   correta no JSON, mas não encaminha mensagens. Timeout 20s.
+4. **Reinício/recriação:** exige filas vazias, salva URLs, reinicia LocalStack,
+   aguarda healthy, verifica topologia e troca uma nova mensagem. Recria container
+   e repete. Detecta hook ausente/URLs inconsistentes após restart. Não testa
+   preservação de mensagens no broker, que é descartável. Timeout 120s.
+
+`test:infra` encadeia PostgreSQL e SQS sequencialmente. Testes não rodam ao importar
+a aplicação nem fazem parte do comando normal `test`. Eles reiniciam serviços:
+execute-os sem outros produtores/consumidores usando este ambiente. Nenhum worker
+de apostas, Inbox ou Outbox foi implementado.
+
+### Resultados efetivamente observados
+
+| Comando/cenário | Resultado |
+|---|---|
+| `docker compose up -d --wait --wait-timeout 120` | PostgreSQL e LocalStack healthy |
+| `bun run test:infra:sqs` | 4 passaram, 0 falharam, 79 expectativas; aproximadamente 17,9s |
+| `docker compose exec -T localstack awslocal sqs list-queues` | As duas filas obrigatórias presentes |
+| `python3 /opt/dwp-sqs/provision.py check`, dentro do container | JSON com sqs=configured e as duas URLs |
+| GetQueueAttributes origem | FIFO=true; VisibilityTimeout=30; polling=20; retention=345600; redrive ARN da DLQ e maxReceiveCount=5 |
+| GetQueueAttributes DLQ | FIFO=true; retention=1209600; byQueue com ARN da origem |
+| CLI SendMessage manual | MessageId `55d0ffef-9824-4b20-8316-0b0dc21e2064` |
+| CLI ReceiveMessage + DeleteMessage manual | Handle obtido, remoção sem erro; nova consulta Messages retornou `None` |
+
+Na primeira consulta manual pós-ACK, uma expressão JMESPath com crases foi
+interpretada pelo shell e falhou. Substituímos por `--query Messages`; a confirmação
+retornou `None`. Foi erro da sonda CLI, não de envio/remoção; os quatro testes SDK
+já haviam passado. Os exemplos em [SETUP](SETUP.md) usam a forma corrigida.
+
+Os resultados não demonstram processamento financeiro, transação SQL integrada à
+mensagem, persistência do broker nem compatibilidade completa com AWS real. O
+próximo módulo será MikroORM e migrations reversíveis, antes de regras financeiras.

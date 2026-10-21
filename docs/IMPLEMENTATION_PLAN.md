@@ -13,12 +13,12 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README
+## Comparação com o README — atualização após infraestrutura
 
-| Requisito/seção | Antes | Após etapa 1 | Evidência futura necessária |
+| Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
-| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Pendente | Containers reais e migrations up/down |
+| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers reais, FIFO/DLQ e persistência PG validados; ORM/migrations pendentes | MikroORM e migrations up/down |
 | Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Pendente | Testes unitários e schema |
 | BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Pendente | Fluxos de negócio e reversões |
 | Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
@@ -26,7 +26,7 @@
 | Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Pendente | Crash após commit antes de ACK |
 | Outbox e eventos (§11) | Ausente | Pendente | Dois publishers, crash e redelivery |
 | Observabilidade (§12) | Ausente | Logs de startup JSON e liveness | Contexto completo, métricas e readiness |
-| Integração/distribuição (§13) | Ausente | Apenas HTTP real da base | PostgreSQL + SQS + falhas reais |
+| Integração/distribuição (§13) | Ausente | HTTP e infraestrutura reais; 2 testes PG e 4 SQS | Atomicidade financeira e ≥3 instâncias |
 | Documentação (§14) | Enunciado | Plano, arquitetura e guia | Atualização a cada funcionalidade |
 | Autenticação (§2) | Ausente | Decisão proposta, sem endpoints financeiros | Porta de identidade explícita e desenho OIDC |
 
@@ -37,8 +37,8 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 
 | Ordem | Commit proposto | Entrega e validação antes do commit |
 |---|---|---|
-| 1 | `chore: initialize NestJS project with Bun` | Base HTTP, configuração estrita, teste real, build, guias; única implementação desta entrega |
-| 2 | `chore: configure PostgreSQL and LocalStack` | Compose isolado, volumes, healthchecks, FIFO e DLQ provisionadas; subir e consultar serviços reais |
+| 1 | `chore: initialize NestJS project with Bun` | Concluída: base HTTP, configuração estrita, teste real, build e guias |
+| 2 | `chore: configure PostgreSQL and LocalStack` | Concluída em dois commits: PostgreSQL persistente e SQS FIFO/DLQ, com testes reais de reinício/recriação |
 | 3 | `chore: configure MikroORM and reversible migrations` | EntityManager por operação e conexão; migration inicial up/down em banco descartável |
 | 4 | `feat: implement immutable Money value object` | Decimal exato, escala e moedas; entradas inválidas, aritmética, imutabilidade e serialização |
 | 5 | `feat: implement immutable wallet ledger entries` | Factory, rehydrate e equação antes/depois; sem mutação |
@@ -92,9 +92,14 @@ auditável; PostgreSQL/SQS completamente substituídos por mocks.
 ## Decisões aprovadas e pendências
 
 Em 21/10/2026, o usuário aprovou **MikroORM + LocalStack + lock pessimista por
-carteira no PostgreSQL**. Essas escolhas orientarão as etapas 2, 3 e 13;
-implementação e validação permanecem pendentes. A decisão e as alternativas
+carteira no PostgreSQL**. Essas escolhas orientam as etapas 2, 3 e 13;
+a infraestrutura da etapa 2 foi validada; ORM e locks permanecem pendentes. A decisão e as alternativas
 estão na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md).
 
 Antes de Money/regras financeiras, fechar escala de entrada, valor zero, limites
 monetários e referências opcionais. A aprovação acima não decide essas ambiguidades.
+
+Também foi aprovado usar LocalStack Community anterior sem token, fixado por
+versão/digest, após identificar a exigência de conta nas versões atuais. A ADR-005
+documenta a imagem 4.14.0, o broker descartável e a perda de mensagens no restart
+do emulador. Isso não é garantia de persistência do broker.

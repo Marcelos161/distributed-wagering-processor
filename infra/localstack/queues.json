@@ -1,0 +1,23 @@
+{
+  "source": {
+    "name": "wager-transactions.fifo",
+    "attributes": {
+      "FifoQueue": "true",
+      "ContentBasedDeduplication": "false",
+      "VisibilityTimeout": "30",
+      "ReceiveMessageWaitTimeSeconds": "20",
+      "MessageRetentionPeriod": "345600"
+    }
+  },
+  "dlq": {
+    "name": "wager-transactions-dlq.fifo",
+    "attributes": {
+      "FifoQueue": "true",
+      "ContentBasedDeduplication": "false",
+      "VisibilityTimeout": "30",
+      "ReceiveMessageWaitTimeSeconds": "20",
+      "MessageRetentionPeriod": "1209600"
+    }
+  },
+  "maxReceiveCount": 5
+}

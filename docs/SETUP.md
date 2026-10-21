@@ -1,11 +1,13 @@
-# Executar a etapa 1
+# Executar a aplicação base e a infraestrutura local
 
-Esta base disponibiliza somente `GET /health/live`. Ainda não processa apostas.
+Esta base disponibiliza somente `GET /health/live`. PostgreSQL e SQS estão
+disponíveis como infraestrutura; a aplicação ainda não processa apostas nem se conecta a eles.
 
 ## Pré-requisito
 
 Bun **1.4.3**, registrado em [.bun-version](../.bun-version).
 Consulte a [instalação oficial](https://bun.sh/docs/installation).
+Para infraestrutura: Docker Engine e plugin Docker Compose com suporte a `up --wait`.
 
 Neste ambiente, Bun foi instalado **somente no projeto**, porque não existia no
 PATH. Para usar o mesmo mecanismo, com npm disponível:
@@ -61,6 +63,12 @@ para containers; não é necessário para a execução local atual.
 | `bun run build` | Compila fontes em dist com checagem de tipos |
 | `bun run start:built` | Executa dist/main.js; exige build anterior |
 | `bun run check` | Typecheck, testes e build, nessa ordem; interrompe na primeira falha |
+| `bun run infra:up` | Inicia PostgreSQL/LocalStack e aguarda saúde, até 120s |
+| `bun run infra:status` | Mostra estado e portas dos dois serviços |
+| `bun run infra:down` | Remove containers/rede deste projeto, preservando volume PostgreSQL |
+| `bun run test:infra:postgres` | 2 testes reais; inclui restart/recriação PostgreSQL |
+| `bun run test:infra:sqs` | 4 testes reais; inclui drift, ACK, redrive e restart/recriação LocalStack |
+| `bun run test:infra` | Executa os dois grupos de infraestrutura sequencialmente |
 
 ## Diagnóstico de startup
 
@@ -110,3 +118,69 @@ Volume: `dwp_postgres_data`. Mudar variáveis de inicialização em `.env` não 
 usuário/senha/banco já persistidos. Não execute `down --volumes` para corrigir isso;
 ajuste as credenciais SQL explicitamente. Alterações de porta/ambiente exigem
 `docker compose up -d` para reconciliar configuração; `restart` não recria containers.
+
+## LocalStack e SQS
+
+Usamos Community 4.14.0, sem token, fixada por digest conforme aprovação. As versões
+atuais exigem conta. Esta configuração é somente de desenvolvimento e não usa AWS real.
+`infra:up` executa o hook que cria/reconcilia as duas filas e espera o healthcheck
+validar seus atributos. Não é necessário instalar AWS CLI ou Python no host:
+awslocal/Python/boto3 já fazem parte da imagem.
+
+| Configuração futura | NestJS no host | NestJS na rede Compose |
+|---|---|---|
+| SQS_ENDPOINT | `http://127.0.0.1:4566` | `http://localstack:4566` |
+| AWS_REGION | `us-east-1` | `us-east-1` |
+| Credenciais AWS locais | `test` / `test` | `test` / `test` |
+| SQS_QUEUE_NAME | `wager-transactions.fifo` | Mesmo nome |
+| SQS_DLQ_NAME | `wager-transactions-dlq.fifo` | Mesmo nome |
+
+O futuro cliente AWS SDK receberá `endpoint`, `region` e `credentials` explicitamente.
+Chamará GetQueueUrl usando os nomes acima. Não copie uma URL interna de um container
+para o host; a estratégia dynamic devolve a URL conforme o endereço de acesso.
+Mudar `LOCALSTACK_PORT` exige ajustar `SQS_ENDPOINT` no cliente; os testes leem a
+porta efetiva do Compose. Os nomes obrigatórios ficam em `infra/localstack/queues.json`.
+Não altere apenas as variáveis de nomes esperando renomear filas automaticamente.
+
+Comandos reais de inspeção:
+
+```bash
+docker compose exec -T localstack awslocal sqs list-queues
+docker compose exec -T localstack python3 /opt/dwp-sqs/provision.py check
+docker compose exec -T localstack python3 /opt/dwp-sqs/provision.py apply
+```
+
+`check` só lê; `apply` cria o que falta e reconcilia atributos mutáveis sem apagar
+mensagens. Falha real de provisionamento torna o serviço unhealthy; veja
+`docker compose logs --tail=80 localstack` e repare a causa antes de repetir apply.
+
+Exemplo manual para filas vazias, sem consumidor concorrente, dentro do container:
+
+```bash
+docker compose exec localstack sh
+queue_url=$(awslocal sqs get-queue-url --queue-name wager-transactions.fifo --query QueueUrl --output text)
+probe_id=$(cat /proc/sys/kernel/random/uuid)
+awslocal sqs send-message --queue-url "$queue_url" --message-body "InfrastructureProbe:$probe_id" --message-group-id infrastructure-demo --message-deduplication-id "$probe_id" --query MessageId --output text
+receipt=$(awslocal sqs receive-message --queue-url "$queue_url" --wait-time-seconds 1 --max-number-of-messages 1 --query 'Messages[0].ReceiptHandle' --output text)
+test "$receipt" != None && awslocal sqs delete-message --queue-url "$queue_url" --receipt-handle "$receipt"
+awslocal sqs receive-message --queue-url "$queue_url" --wait-time-seconds 1 --query Messages --output text
+exit
+```
+
+Send retorna um MessageId; DeleteMessage bem-sucedido não imprime corpo; a última
+consulta retorna `None` se a fila continuar vazia. O receipt handle identifica
+aquele recebimento e deve ser obtido novamente em caso de reentrega.
+
+**Reinícios:** o PostgreSQL preserva seus dados; LocalStack usa PERSISTENCE=0 e
+recria filas vazias/configuração a cada restart. Não reinicie o emulador com
+mensagens importantes pendentes. Testes futuros de crash do worker devem manter
+LocalStack rodando. Reiniciar os serviços após estarem ociosos:
+
+```bash
+docker compose restart
+docker compose up -d --wait --wait-timeout 120
+```
+
+Os testes SQS exigem filas vazias, não executam purge e não devem competir com
+produtores/consumidores. Se um teste falhar após enviar uma mensagem, inspecione
+a fila antes de limpar apenas a mensagem de prova; nenhum cleanup global é executado.
