@@ -1,5 +1,30 @@
 # Arquitetura e registro de decisões
 
+## ADR-006 — MikroORM e identidade de aplicação (adotada)
+
+MikroORM/core/postgresql 7.2.5, integração oficial Nest 7.1.0, ESM/NodeNext e Bun
+1.4.3. PersistenceModule usa forRootAsync, lê somente DATABASE_URL e registra
+providers oficiais. Alternativa de providers/middleware próprios foi descartada
+por duplicar lifecycle e RequestContext já fornecidos pela integração.
+
+Lista explícita de entidades vazia; sem schema update/create, ensureDatabase ou
+ensureIndexes. allowGlobalContext=false; contexto HTTP oficial por requisição;
+operações fora de HTTP usam fork. Pool de até 5 conexões por processo é ponto
+inicial, sujeito a dimensionamento quando existirem múltiplos workers.
+
+ApplicationDatabaseCheck verifica papel PostgreSQL real no startup e recusa
+superuser/createdb/createrole/bypassrls. Não troca grants nem audita todos os
+privilégios indiretos. Aplicação usa wager_app; não lê MIGRATION_DATABASE_URL.
+Sem conexão válida, inicialização falha; liveness não consulta banco por request.
+Readiness completa continua pendente.
+
+Futuras entidades/mapeadores/repositórios ficam em infrastructure/persistence;
+domínio continua sem imports Nest/ORM. Não antecipamos classes base ou repositórios
+genéricos. Locks pessimistas futuros usarão EM transacional; ainda não implementados.
+
+Evidência: Nest + SQL real + HTTP, schema vazio e DDL negado para app em banco
+descartável; credencial admin recusada. Nenhuma tabela criada no banco principal.
+
 Estado em 21/10/2026: **base NestJS e infraestrutura PostgreSQL/SQS implementadas**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).

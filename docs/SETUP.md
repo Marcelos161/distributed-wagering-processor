@@ -1,7 +1,7 @@
 # Executar a aplicação base e a infraestrutura local
 
-Esta base disponibiliza somente `GET /health/live`. PostgreSQL e SQS estão
-disponíveis como infraestrutura; a aplicação ainda não processa apostas nem se conecta a eles.
+Esta base disponibiliza somente `GET /health/live`. A aplicação conecta ao PostgreSQL
+via MikroORM como usuário restrito; ainda não processa apostas nem consome SQS.
 
 ## Pré-requisito
 
@@ -27,6 +27,8 @@ da aplicação, scripts e testes são gerenciados/executados por Bun.
 
 ```bash
 bun install --frozen-lockfile
+export DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering
+bun run infra:up
 bun run check
 bun run start
 ```
@@ -103,8 +105,9 @@ Não é necessário criar `.env`; se precisar personalizar, copie o exemplo para
 | Futuro NestJS na rede Compose | `postgresql://wager_app:local_app_only@postgres:5432/wagering` |
 | Migrations no host | `postgresql://wager_admin:local_admin_only@127.0.0.1:55432/wagering` |
 
-`DATABASE_URL` e `MIGRATION_DATABASE_URL` estão preparadas, mas a aplicação ainda
-não as consome. O usuário app não cria tabelas nem é administrador; permissões das
+`DATABASE_URL` é obrigatória no startup e no teste HTTP real. Pode ser exportada
+ou definida em `.env` (Bun carrega esse arquivo). Não há fallback administrativo.
+O usuário app não cria tabelas nem é administrador; permissões das
 tabelas serão concedidas pelas migrations futuras. Senhas com caracteres especiais
 precisam de percent-encoding nas URLs.
 
@@ -184,3 +187,11 @@ docker compose up -d --wait --wait-timeout 120
 Os testes SQS exigem filas vazias, não executam purge e não devem competir com
 produtores/consumidores. Se um teste falhar após enviar uma mensagem, inspecione
 a fila antes de limpar apenas a mensagem de prova; nenhum cleanup global é executado.
+
+## MikroORM no NestJS
+
+`bun run test:orm` cria/remove bancos `dwp_test_<UUID>` no PostgreSQL local e valida
+DI, SQL, HTTP e recusa do papel admin. Não reinicia containers nem altera wagering.
+Os testes consultam credenciais locais no Compose; não exigem DATABASE_URL exportada.
+`bun run check` inclui HTTP real e exige DATABASE_URL válida + PostgreSQL disponível.
+Não executamos criação de schema nem migrations automaticamente no startup.

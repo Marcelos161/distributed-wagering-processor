@@ -615,3 +615,124 @@ já haviam passado. Os exemplos em [SETUP](SETUP.md) usam a forma corrigida.
 Os resultados não demonstram processamento financeiro, transação SQL integrada à
 mensagem, persistência do broker nem compatibilidade completa com AWS real. O
 próximo módulo será MikroORM e migrations reversíveis, antes de regras financeiras.
+
+## 10. MikroORM no NestJS, sem entidades financeiras
+
+### Problema e decisões
+
+A aplicação precisa consultar PostgreSQL sem usar a credencial administrativa.
+Adotamos MikroORM 7.2.5, driver PostgreSQL da mesma versão e integração oficial
+NestJS 7.1.0 (compatível com Nest 12). A configuração ESM/NodeNext existente serve
+ao ORM; Bun 1.4.3 executa fontes, build e testes. Não há criação automática de banco,
+índices ou tabelas no startup. Não há entidade fictícia no registro de produção.
+
+Alternativa seria escrever providers e middleware próprios; o módulo oficial já
+gerencia pool, injeção, contexto HTTP e shutdown. Usamos `forRootAsync` para ler
+ambiente ao montar a aplicação, não ao importar arquivos. Variáveis são obrigatórias:
+sem DATABASE_URL não se tenta adivinhar conexão nem reutilizar credencial de migration.
+
+### Conceitos: ORM, Entity, Repository, EntityManager, Unit of Work, Identity Map
+
+**ORM** relaciona objetos do programa com registros do banco. O MikroORM permite
+persistir mudanças e coordenar consultas/transações sem espalhar SQL por controllers.
+Ele não substitui regras de domínio nem constraints PostgreSQL.
+
+**Entity** é um tipo mapeado: seus campos correspondem a colunas, e a chave primária
+identifica um registro. Futuras entidades de persistência ficarão na infraestrutura.
+Isso não exige adicionar decorators ORM às classes financeiras: mapeadores poderão
+transformar estado persistido em domínio por `rehydrate` e extrair estado para gravação.
+Nenhuma dessas entidades ou mapeadores é antecipada nesta etapa.
+
+**Repository** concentra consultas de uma entidade. O EntityRepository do ORM opera
+com seu EntityManager; um futuro adaptador de repositório implementará o contrato
+exigido pelo caso de uso. Não criamos um GenericRepository vazio só para ter uma camada.
+
+**EntityManager (EM)** coordena consultas, objetos carregados e gravações. `em.fork()`
+cria um contexto de trabalho independente, compartilhando o pool/driver. Nos testes
+usamos `execute` para SQL real sem precisar criar uma Entity de demonstração.
+
+**Identity Map** associa tipo + chave primária ao mesmo objeto dentro de um contexto.
+Carregar o mesmo registro duas vezes pode devolver a mesma instância; isso evita
+duas cópias divergentes na mesma operação. Não é cache global nem garantia de
+idempotência. Requisições diferentes precisam de contextos independentes.
+
+**Unit of Work** acompanha entidades gerenciadas e suas mudanças. `flush()` calcula
+as escritas necessárias. No contexto de uma transação explícita, elas participam
+dessa transação; fazer uma alteração num objeto não equivale a confirmar no banco.
+SQL manual via `execute` não sincroniza automaticamente objetos já carregados.
+
+**`EntityManager.transactional(callback)`** abre um contexto transacional, passa
+o EM desse contexto ao callback, realiza flush/commit se concluir, ou rollback se
+lançar erro. O callback deve usar esse EM para todas as consultas/escritas relacionadas.
+Uma operação em outro pool/conexão não entra magicamente na mesma transação. Locks
+pessimistas futuros serão adquiridos dentro desse limite e liberados no commit/rollback.
+Não foi implementado lock financeiro nesta etapa.
+
+### Caminho completo: inicialização até SQL
+
+1. `bootstrap` chama `createApplication`, que entrega AppModule ao Nest.
+2. AppModule importa PersistenceModule; `forRootAsync.useFactory` lê DATABASE_URL.
+3. `createOrmOptions` configura driver, pool e descoberta vazia; MikroORM.init
+   estabelece a infraestrutura de conexão. Não executa migrations.
+4. O módulo oficial registra MikroORM e EntityManager como providers; `@Inject`
+   informa qual token o construtor de ApplicationDatabaseCheck precisa receber.
+5. Durante `app.init()`/`listen()`, Nest chama `onModuleInit`. A classe cria um fork,
+   executa SELECT em pg_roles através do driver/pool PostgreSQL e verifica privilégios.
+6. O driver envia SQL, PostgreSQL autentica/executa e devolve linhas. O método
+   aguarda essa Promise; erro de conexão/consulta ou papel administrativo aborta startup.
+7. Nas requisições HTTP, middleware oficial cria RequestContext próprio. No shutdown,
+   o módulo oficial fecha o pool. Workers futuros precisarão de fork/contexto explícito.
+
+### Arquivos e funções
+
+| Arquivo/função | Contrato, fluxo, chamadores, erros e motivos |
+|---|---|
+| [database-url.ts](../src/infrastructure/persistence/database-url.ts), `readDatabaseUrl(env,purpose)` | Mapa readonly e purpose `'application'/'migrations'` → string. Seleciona uma única variável, exige valor, parseia URL, verifica protocolo PostgreSQL/host/usuário/banco. Ausência ou formato inválido lança erro que não inclui a URL/senha. Usada pelo módulo Nest e pela configuração futura da CLI; nunca faz fallback entre credenciais |
+| [orm-options.ts](../src/infrastructure/persistence/orm-options.ts), `createOrmOptions(clientUrl)` | String → opções tipadas por defineConfig. Entidades vazias, warnWhenNoEntities=false, ensureDatabase/ensureIndexes=false, allowGlobalContext=false, pool 0–5, debug=false. Não abre conexão; inicializador ORM interpreta as opções. Desabilitar aviso de lista vazia é temporário, até existir primeira entidade |
+| Callback `logger(message)` | String → void; encaminha mensagem ao ConsoleLogger JSON com contexto MikroORM. Chamado pelo ORM; debug SQL desligado |
+| [persistence.module.ts](../src/infrastructure/persistence/persistence.module.ts), `PersistenceModule` | Classe sem métodos/construtor próprio. Registra módulo oficial e ApplicationDatabaseCheck; `useFactory()` sem parâmetros retorna createOrmOptions(readDatabaseUrl(process.env,'application')). PostgreSqlDriver explícito permite ao Nest registrar tokens específicos do driver. Falhas são propagadas |
+| [application-database-check.ts](../src/infrastructure/persistence/application-database-check.ts), construtor | MikroORM injetado → instância; guarda referência privada readonly; @Inject torna o token explícito, evitando depender só da inferência de metadata |
+| `ApplicationDatabaseCheck.onModuleInit()` | Sem argumentos → Promise<void>. Fork, SELECT de privilégios do usuário atual, exige linha e rejeita superuser/createdb/createrole/bypassrls. Chamado pelo lifecycle Nest; teste também o chama diretamente. Não concede/revoga privilégios; SQL real continua responsável por autorização |
+| [app.module.ts](../src/app.module.ts), AppModule | Passou a importar PersistenceModule; mantém controller de health. Nenhum método novo |
+
+A checagem do papel não é uma auditoria completa de grants ou memberships; migrations
+futuras ainda devem conceder permissões mínimas e testes SQL devem verificar cada
+constraint. Liveness continua público e não consulta banco a cada request; startup
+agora exige banco disponível. Readiness PostgreSQL+SQS continua pendente.
+
+### Testes e isolamento
+
+[database-configuration.test.ts](../test/database-configuration.test.ts): callbacks
+sem retorno útil chamados pelo Bun; verificam seleção exclusiva das duas URLs,
+ausência de fallback, rejeição de cinco formatos inválidos sem revelar o texto
+sensível e opções que impedem criação automática/global context. As closures de
+expect adiam execução para toThrow; erros não esperados falham o teste. São 7 casos.
+
+[disposable-database.ts](../infra/test/disposable-database.ts): `withDisposableDatabase(run)`
+recebe callback assíncrono com URLs application/migrations e retorna Promise<void>.
+Lê configuração Compose, gera nome `dwp_test_` + UUID, conecta ao banco de controle
+`postgres`, cria banco com template0 e chama run. Em finally remove **somente** o
+banco que acabou de criar, com FORCE, e fecha conexão. Nenhum nome externo é aceito;
+identificador SQL vem só do UUID interno. O flag created impede apagar algo que
+não foi criado pela função. Se erro de cleanup ocorrer, ele é propagado. A tabela
+de produção, o banco wagering e seu volume não são alvos desse helper.
+
+[orm.test.ts](../infra/test/orm.test.ts): dois callbacks test (sem parâmetros,
+Promise<void>) usam o helper. O callback run recebe URLs e executa:
+
+1. Inicialização real do Nest com DATABASE_URL de app do banco descartável; resolve
+   MikroORM via `app.get`, faz SELECT de usuário/banco, confirma lista de tabelas
+   vazia, consulta liveness por socket real e exige CREATE TABLE negado. Em finally
+   fecha app e restaura variável de ambiente. Detecta credencial errada, schema
+   automático, falha de DI/HTTP e grants excessivos.
+2. Inicializa MikroORM com credencial admin somente no banco descartável; chama
+   o guard de startup e exige rejeição. Fecha ORM em finally. Demonstra a recusa
+   explícita antes de usar essa credencial como aplicação.
+
+Resultados: `bun run test:orm` **2 passaram, 0 falharam, 7 expectativas**;
+`DATABASE_URL=... bun run check` **24 testes passaram**, typecheck/build passaram.
+O teste HTTP existente agora também inicializa ORM real e exige DATABASE_URL.
+
+Referências: [integração Nest](https://mikro-orm.io/docs/usage-with-nestjs),
+[transações](https://mikro-orm.io/docs/transactions),
+[compatibilidade v7](https://mikro-orm.io/docs/upgrading-v6-to-v7).
