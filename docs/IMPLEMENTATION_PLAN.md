@@ -89,9 +89,12 @@ auditável; PostgreSQL/SQS completamente substituídos por mocks.
 | Constraints só existem na aplicação | Tentativas diretas de violação com papel SQL da aplicação |
 | Metadata/decorators divergem entre TS e build | Exercitar aplicação real e saída compilada com Bun |
 
-## Decisões pendentes de participação
+## Decisões aprovadas e pendências
 
-Recomendação inicial: MikroORM + LocalStack + lock pessimista por carteira.
-As alternativas estão em [ARCHITECTURE](../ARCHITECTURE.md). Antes de Money/regras
-financeiras, fechar também escala de entrada, valor zero, limites monetários e
-referências opcionais. Nenhuma dessas escolhas bloqueia a base entregue.
+Em 21/10/2026, o usuário aprovou **MikroORM + LocalStack + lock pessimista por
+carteira no PostgreSQL**. Essas escolhas orientarão as etapas 2, 3 e 13;
+implementação e validação permanecem pendentes. A decisão e as alternativas
+estão na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md).
+
+Antes de Money/regras financeiras, fechar escala de entrada, valor zero, limites
+monetários e referências opcionais. A aprovação acima não decide essas ambiguidades.

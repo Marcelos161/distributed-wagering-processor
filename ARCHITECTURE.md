@@ -1,7 +1,8 @@
 # Arquitetura e registro de decisões
 
-Estado em 21/10/2026: **somente a base NestJS foi implementada**. O restante é
-proposta, não garantia já entregue. Fonte de requisitos: [README](README.md).
+Estado em 21/10/2026: **somente a base NestJS foi implementada**. Há decisões
+aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
+representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
 
 ## ADR-001 — Base executável (adotada)
@@ -74,17 +75,33 @@ O domínio não importa NestJS nem ORM. Aplicação coordena regras e persistên
 através de contratos; infraestrutura implementa esses contratos. HTTP e SQS
 chamam o mesmo caso de uso. Não se criam interfaces para cada classe sem necessidade.
 
-## Decisões propostas para as próximas etapas
+## ADR-003 — ORM, emulador e concorrência (aprovada; implementação pendente)
 
-Estas propostas foram apresentadas para participação do usuário; a base atual
-não depende da adoção delas. Detalhes serão fechados antes de sua implementação.
+Em 21/10/2026, o usuário aprovou explicitamente a recomendação: **MikroORM,
+LocalStack e lock pessimista por carteira no PostgreSQL**.
+
+MikroORM será o ORM; LocalStack emulará SQS no ambiente Compose. O processamento
+financeiro adquirirá lock na linha da wallet dentro da transação SQL. Operações
+da mesma carteira serão serializadas; carteiras distintas poderão avançar em
+paralelo. Isso simplifica a proteção contra disputa de saldo, com o custo de
+espera em carteiras muito concorridas. Não haverá lock global de todas as wallets.
+
+TypeORM, MiniStack e locking otimista foram considerados como alternativas. Os
+trade-offs estão na tabela abaixo. A aprovação define a direção, mas não substitui
+os testes de integração, concorrência e recuperação exigidos pelo README.
+
+## Decisões para as próximas etapas
+
+As três escolhas da ADR-003 estão aprovadas. Os demais temas da tabela continuam
+como propostas; detalhes de schema, versões, mapeamento e retries serão definidos
+nas etapas correspondentes.
 
 | Tema | Recomendação | Alternativas e trade-offs |
 |---|---|---|
-| ORM | MikroORM, entidades de persistência separadas do domínio | TypeORM é aceito; separar mapeamento exige código adicional, mas mantém domínio independente |
-| Emulador | LocalStack em Compose | MiniStack é permitido; verificar disponibilidade/licença e imagem antes de fixar versão |
+| ORM (aprovado) | MikroORM; proposta de entidades de persistência separadas do domínio | TypeORM é aceito; separar mapeamento exige código adicional, mas mantém domínio independente |
+| Emulador (aprovado) | LocalStack em Compose | MiniStack é permitido; verificar disponibilidade/licença e imagem antes de fixar versão |
 | Dinheiro | `bigint` em centavos internamente; string decimal na borda; PostgreSQL `NUMERIC(p,2)` | Decimal de precisão configurada também serve; bigint elimina arredondamento implícito nas operações exigidas (soma/subtração), mas exige serialização explícita. Definir limite `p` e rejeição de overflow antes do schema |
-| Concorrência | Lock pessimista na linha da wallet durante a transação SQL | Lock otimista precisa retries; UPDATE condicionado também protege saldo, mas exige coordenar resultado, ledger e reversões. Lock por wallet simplifica raciocínio e limita vazão de uma carteira muito disputada |
+| Concorrência (aprovada) | Lock pessimista na linha da wallet durante a transação SQL | Lock otimista precisa retries; UPDATE condicionado também protege saldo, mas exige coordenar resultado, ledger e reversões. Lock por wallet simplifica raciocínio e limita vazão de uma carteira muito disputada |
 | Idempotência | Unicidade persistente da key e de `(providerId, externalTransactionId)`; hash canônico e snapshot do resultado | Cache e deduplicação FIFO não sobrevivem como garantia suficiente. Resolver colisão com a linha persistida sem duplicar efeito; definir escopo exato da key |
 | Inbox | `(consumerName, messageId)` único, hash do conteúdo e processamento atômico | Inbox sozinha não identifica uma mesma transação enviada com outro messageId; a idempotência de negócio continua necessária |
 | Outbox | Evento salvo junto ao efeito; publishers reivindicam lotes com exclusão mútua no PostgreSQL e recuperação de posse | `SKIP LOCKED` com lease reduz bloqueio durante I/O; manter lock durante publicação é mais simples, mas segura transação durante rede. Escolha final e timeout exigem teste de crash |

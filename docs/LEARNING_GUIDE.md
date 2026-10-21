@@ -303,3 +303,17 @@ concorrência financeira, precisão monetária ou recuperação de eventos exist
 
 Essas definições introduzem o plano. Cada módulo terá seu próprio exemplo executado,
 contratos, erros e evidência quando efetivamente implementado.
+
+## 7. Direção arquitetural aprovada — 21/10/2026
+
+O usuário aprovou MikroORM, LocalStack e lock pessimista por carteira. A decisão
+está na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md); não houve implementação
+desses componentes nesta atualização documental.
+
+Exemplo do comportamento a implementar: duas apostas de `80.00 BRL` disputam uma
+wallet com `100.00 BRL`. A primeira transação obtém o lock da linha, verifica saldo,
+debita e confirma saldo/ledger/eventos pendentes juntos. A segunda aguarda esse
+commit; ao adquirir o lock, encontra `20.00 BRL` e rejeita a aposta sem novo débito.
+Uma operação em outra wallet não depende desse mesmo lock. O teste real deverá
+comprovar esse resultado com processos independentes; o exemplo não é evidência
+de concorrência já validada.
