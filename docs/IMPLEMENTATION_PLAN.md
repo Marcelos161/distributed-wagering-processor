@@ -1,0 +1,97 @@
+# Auditoria e plano incremental
+
+## Auditoria inicial — 21/10/2026
+
+- A pasta continha apenas `README.md` (27.497 bytes), lido integralmente.
+- `git status` informou que não havia repositório; não existiam branch ou histórico.
+- Não havia código, testes, migrations, Compose ou instruções AGENTS preexistentes
+  na pasta e nos diretórios ancestrais consultados.
+- O README oficial foi preservado; comandos da implementação foram acrescentados
+  ao final. SHA-256 do enunciado original antes desse acréscimo:
+  `47795fce2fc38cae5f1b91368ebaf80b7a2ed1fe147f36704b665faf0613812e`.
+- Git foi inicializado em `main`. Nenhum remoto foi configurado e não houve push.
+- Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
+  Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
+
+## Comparação com o README
+
+| Requisito/seção | Antes | Após etapa 1 | Evidência futura necessária |
+|---|---|---|---|
+| Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
+| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Pendente | Containers reais e migrations up/down |
+| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Pendente | Testes unitários e schema |
+| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Pendente | Fluxos de negócio e reversões |
+| Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
+| API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
+| Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Pendente | Crash após commit antes de ACK |
+| Outbox e eventos (§11) | Ausente | Pendente | Dois publishers, crash e redelivery |
+| Observabilidade (§12) | Ausente | Logs de startup JSON e liveness | Contexto completo, métricas e readiness |
+| Integração/distribuição (§13) | Ausente | Apenas HTTP real da base | PostgreSQL + SQS + falhas reais |
+| Documentação (§14) | Enunciado | Plano, arquitetura e guia | Atualização a cada funcionalidade |
+| Autenticação (§2) | Ausente | Decisão proposta, sem endpoints financeiros | Porta de identidade explícita e desenho OIDC |
+
+## Etapas e commits planejados
+
+Cada linha é uma unidade de trabalho com documentação e testes próprios. Uma etapa
+que cresça deve ser dividida; a mensagem é proposta, não registro de commit realizado.
+
+| Ordem | Commit proposto | Entrega e validação antes do commit |
+|---|---|---|
+| 1 | `chore: initialize NestJS project with Bun` | Base HTTP, configuração estrita, teste real, build, guias; única implementação desta entrega |
+| 2 | `chore: configure PostgreSQL and LocalStack` | Compose isolado, volumes, healthchecks, FIFO e DLQ provisionadas; subir e consultar serviços reais |
+| 3 | `chore: configure MikroORM and reversible migrations` | EntityManager por operação e conexão; migration inicial up/down em banco descartável |
+| 4 | `feat: implement immutable Money value object` | Decimal exato, escala e moedas; entradas inválidas, aritmética, imutabilidade e serialização |
+| 5 | `feat: implement immutable wallet ledger entries` | Factory, rehydrate e equação antes/depois; sem mutação |
+| 6 | `feat: implement Wallet aggregate` | Abertura/debit/credit, version, saldo e ledger inseparáveis; testes de invariantes |
+| 7 | `feat: implement wager transaction state machine` | Kinds, transições, estados terminais, failure codes; casos válidos e inválidos |
+| 8 | `feat: enforce financial database constraints` | Persistência/mapeamento e constraints, ledger imutável; tentar violar por SQL direto |
+| 9 | `feat: define versioned integration events` | Classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
+| 10 | `feat: persist transactional outbox records` | Modelo/repositório de Outbox e gravação dentro da mesma transação SQL; sem publicação ainda |
+| 11 | `feat: open and query wallets atomically` | Abertura + OPENING/ledger para saldo positivo, version=1, consultas e porta de identidade |
+| 12 | `feat: persist wager idempotency and original results` | Unicidade key e identidade externa, JSON canônico e snapshot; colisões e restart |
+| 13 | `feat: process BET with wallet-level locking` | Débito + ledger + status + outbox atômicos; 50 replays e 2 apostas de 80 sobre saldo 100 |
+| 14 | `feat: process WIN and LOSS transactions` | Crédito e resultado sem movimento; eventos e version corretos |
+| 15 | `feat: process full REFUND reversals` | Mesma referência completa, uma vez por tipo, valores iguais e pendência persistida |
+| 16 | `feat: process ROLLBACK reversals` | Inversão de BET/WIN/REFUND e código específico para reversão sem saldo |
+| 17 | `feat: expose wagering HTTP contracts` | DTOs, OPENING bloqueado, header obrigatório, erros consistentes, consultas e cursor opaco |
+| 18 | `feat: implement transactional SQS inbox consumer` | Mesmo use case do HTTP, inbox na transação, ACK pós-commit, retry/DLQ e shutdown |
+| 19 | `feat: publish outbox events with concurrent workers` | Reivindicação recuperável, backoff, eventId estável, dois publishers e crash após envio |
+| 20 | `feat: reprocess pending transaction references` | Worker agendado, tentativas/TTL persistidos, resolução ou rejeição com evento |
+| 21 | `feat: reconcile wallet balances against ledger` | Leitura consistente, diferença assinada, alerta sem correção silenciosa |
+| 22 | `feat: add financial observability and readiness` | Logs correlacionados, métricas exigidas e probes PostgreSQL/SQS |
+| 23 | `test: verify distributed concurrency and crash recovery` | ≥3 processos, wallets distintas, kill pós-commit/pré-ACK, reinício e reconciliação final |
+| 24 | `docs: document setup guarantees and delivery evidence` | Setup reproduzível, comandos, matriz final de requisitos e limitações reais |
+
+Os testes financeiros/distribuídos começam nas etapas que criam os riscos; a etapa
+23 consolida a demonstração completa, não adia todas as validações até o fim.
+Modelos de eventos e persistência Outbox precedem mutações financeiras para não
+introduzir um fluxo que precise publicar diretamente ou perder eventos.
+
+## Riscos e critérios eliminatórios
+
+Os oito eliminatórios expressos no README são: dinheiro em `number`; saldo negativo
+por corrida; débito/crédito duplicado; idempotência somente em memória; correção
+restrita a uma instância; evento publicado antes do commit; ausência de ledger
+auditável; PostgreSQL/SQS completamente substituídos por mocks.
+
+| Risco | Como será enfrentado e comprovado |
+|---|---|
+| Read-calculate-update perde alteração concorrente | Lock por wallet no banco e teste real com apostas concorrentes |
+| Replay consulta saldo atual em vez do original | Snapshot persistido do resultado e replay depois de outra movimentação |
+| Dois identificadores externos ou keys contornam dedup | Unicidade separada e testes de colisão em entradas HTTP/SQS |
+| Reversões cruzadas entre jogador/moeda/rodada | Validação completa da referência e integridade no schema |
+| Deadlocks e hot wallets | Ordem estável de locks, transações curtas e retry limitado de falhas transitórias |
+| Lock global esconde concorrência real | Testes de wallets distintas e ≥3 processos independentes |
+| Falha depois de commit ou publicação | Outbox durável e consumidor idempotente; matar processo na janela crítica |
+| FIFO esconde duplicata na demonstração | Variar dedup IDs e provocar redelivery, mantendo identidade de negócio |
+| Mensagem venenosa bloqueia fila | Taxonomia de falhas, limite de retries e DLQ observável |
+| Reconciliação vê dois instantes diferentes | Snapshot consistente ou mesmo lock; não comparar leituras incompatíveis |
+| Constraints só existem na aplicação | Tentativas diretas de violação com papel SQL da aplicação |
+| Metadata/decorators divergem entre TS e build | Exercitar aplicação real e saída compilada com Bun |
+
+## Decisões pendentes de participação
+
+Recomendação inicial: MikroORM + LocalStack + lock pessimista por carteira.
+As alternativas estão em [ARCHITECTURE](../ARCHITECTURE.md). Antes de Money/regras
+financeiras, fechar também escala de entrada, valor zero, limites monetários e
+referências opcionais. Nenhuma dessas escolhas bloqueia a base entregue.
