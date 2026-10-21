@@ -36,7 +36,7 @@ curl --fail http://127.0.0.1:3000/health/live
 ```
 
 Resposta: HTTP 200, `{"status":"ok"}`. A porta é local por padrão.
-`GET /health/ready` retorna 404 nesta etapa: banco/fila ainda não foram configurados.
+`GET /health/ready` retorna 404 nesta etapa: a aplicação ainda não tem probes de dependências.
 Finalize com Ctrl+C. A aplicação registra encerramento para SIGINT/SIGTERM.
 
 ## Configuração
@@ -71,5 +71,42 @@ para containers; não é necessário para a execução local atual.
   a um crash por regra financeira. Ainda não há worker SQS para drenar.
 
 Os resultados efetivamente observados estão no [guia de aprendizado](LEARNING_GUIDE.md).
-Banco, mensageria, migrations e testes distribuídos pertencem às próximas etapas;
-nenhum comando para eles é anunciado como disponível.
+Migrations e testes financeiros distribuídos pertencem às próximas etapas.
+
+## PostgreSQL local
+
+```bash
+bun run infra:up
+bun run infra:status
+bun run test:infra:postgres
+```
+
+`infra:up` aguarda healthchecks; `infra:down` para/remove containers e rede sem
+apagar volumes. O teste PostgreSQL reinicia e recria seu container, verificando
+que um registro persistido sobrevive; não execute durante outro trabalho no banco.
+
+As credenciais em `.env.example` são apenas locais e já têm defaults no Compose.
+Não é necessário criar `.env`; se precisar personalizar, copie o exemplo para
+`.env` e mantenha as URLs coerentes com os valores escolhidos.
+
+| Cliente | Endereço PostgreSQL |
+|---|---|
+| NestJS no host | `postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering` |
+| Futuro NestJS na rede Compose | `postgresql://wager_app:local_app_only@postgres:5432/wagering` |
+| Migrations no host | `postgresql://wager_admin:local_admin_only@127.0.0.1:55432/wagering` |
+
+`DATABASE_URL` e `MIGRATION_DATABASE_URL` estão preparadas, mas a aplicação ainda
+não as consome. O usuário app não cria tabelas nem é administrador; permissões das
+tabelas serão concedidas pelas migrations futuras. Senhas com caracteres especiais
+precisam de percent-encoding nas URLs.
+
+Para consultar sem instalar psql no host:
+
+```bash
+docker compose exec -T postgres sh -c 'PGPASSWORD="$POSTGRES_APP_PASSWORD" psql -h 127.0.0.1 -U wager_app -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -c "SELECT current_user, current_database();"'
+```
+
+Volume: `dwp_postgres_data`. Mudar variáveis de inicialização em `.env` não modifica
+usuário/senha/banco já persistidos. Não execute `down --volumes` para corrigir isso;
+ajuste as credenciais SQL explicitamente. Alterações de porta/ambiente exigem
+`docker compose up -d` para reconciliar configuração; `restart` não recria containers.

@@ -1,0 +1,27 @@
+name: dwp
+
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-wagering}
+      POSTGRES_USER: wager_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-local_admin_only}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-local_app_only}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/10-create-app-role.sh:/docker-entrypoint-initdb.d/10-create-app-role.sh:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - PGPASSWORD="$$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -tAc 'SELECT 1' >/dev/null
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    stop_grace_period: 30s
+
+volumes:
+  postgres_data:

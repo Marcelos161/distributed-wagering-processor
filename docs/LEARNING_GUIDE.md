@@ -317,3 +317,113 @@ commit; ao adquirir o lock, encontra `20.00 BRL` e rejeita a aposta sem novo dé
 Uma operação em outra wallet não depende desse mesmo lock. O teste real deverá
 comprovar esse resultado com processos independentes; o exemplo não é evidência
 de concorrência já validada.
+
+## 8. Infraestrutura PostgreSQL: Compose, volume e usuário da aplicação
+
+### Problema e decisão
+
+Precisamos de um banco real, reproduzível, que preserve dados ao trocar o container.
+Docker Compose lê [compose.yaml](../compose.yaml) e gerencia serviços, rede e volumes
+como um projeto. O serviço `postgres` executa PostgreSQL 17.11; a imagem está fixada
+pelo digest SHA-256, portanto a tag não muda silenciosamente os binários utilizados.
+Escolhemos a linha 17 estável; não há requisito no enunciado que exija a linha 18.
+
+Um **container** é a execução isolada da imagem. Sua camada gravável é descartável.
+Um **volume nomeado** é armazenamento gerenciado pelo Docker fora dessa camada.
+`dwp_postgres_data` é montado em `/var/lib/postgresql/data`, onde essa imagem grava
+os arquivos do banco. Reiniciar ou recriar o container reutiliza esses arquivos.
+`docker compose down` preserva o volume; acrescentar `--volumes` o apagaria.
+Não há motivo para esse apagamento no fluxo normal de desenvolvimento.
+
+### Propriedades do Compose
+
+| Propriedade | Significado nesta configuração |
+|---|---|
+| `name: dwp` | Prefixa recursos do projeto; evita depender do nome da pasta com espaços |
+| `services.postgres` | Define o serviço e seu nome DNS dentro da rede Compose |
+| `image` | Imagem oficial e conteúdo fixado por digest; sem build próprio |
+| `environment` | Variáveis recebidas pelo processo do container; `${VAR:-padrão}` usa valor local ou padrão de desenvolvimento |
+| `ports` | `127.0.0.1:55432:5432`: porta do host → porta do container, acessível apenas por loopback |
+| `volumes: postgres_data:...` | Monta dados persistentes; declaração final `volumes` cria o volume nomeado |
+| `volumes: ./infra/...:...:ro` | Monta script do repositório somente para leitura, no diretório de inicialização da imagem |
+| `healthcheck.test` | Executa SELECT 1 via TCP e senha; exige banco, usuário e autenticação funcionando |
+| `CMD-SHELL` e `$$` | Executa shell no container; `$$` adia expansão da variável até esse shell, em vez de o Compose expandi-la no host |
+| `interval: 5s` / `timeout: 3s` | Frequência da sonda e duração máxima de cada tentativa |
+| `retries: 12` / `start_period: 15s` | Tolerância a falhas consecutivas e período inicial de aquecimento |
+| `stop_grace_period: 30s` | Tempo para o banco encerrar antes de Docker forçar término |
+
+O Compose cria a rede `dwp_default` automaticamente. Não usamos `container_name`
+nem rede externa compartilhada. Não há dependência entre PostgreSQL e LocalStack:
+eles podem iniciar independentemente. Sem política de restart automático nesta
+etapa, os serviços iniciam sob comando explícito do desenvolvedor.
+
+### Script de inicialização do PostgreSQL
+
+[10-create-app-role.sh](../infra/postgres/10-create-app-role.sh) é um script linear,
+sem funções próprias. A imagem oficial o chama **somente quando o volume está vazio**.
+
+- **Entradas:** POSTGRES_USER, POSTGRES_DB e POSTGRES_APP_PASSWORD (strings do ambiente).
+- **Retorno:** exit status 0 quando os comandos SQL concluem; diferente de zero se falhar.
+- **Passos:** `set -eu` interrompe erro/variável ausente; chama psql com
+  `ON_ERROR_STOP=1`; cria `wager_app` com login sem privilégios administrativos;
+  concede conexão ao banco e uso do schema public.
+- **Segurança de SQL:** `:'app_password'` faz quoting de literal e `:"db_name"`
+  faz quoting de identificador via psql. O heredoc delimitado por `'SQL'` não
+  expande variáveis no shell; a substituição é feita pelo psql.
+- **Dependências:** shell/psql da imagem e servidor de inicialização PostgreSQL.
+- **Erros:** não ignora falhas nem recria usuário por conta própria em banco existente.
+  A ausência de repetição no restart é garantida pelo entrypoint oficial e pelo volume.
+- **Motivo:** a aplicação não deve ser superusuária, pois poderia contornar proteções
+  do ledger. Migrations usarão conexão administrativa separada e concederão permissões
+  específicas sobre as futuras tabelas; elas ainda não existem.
+- **Exemplo:** primeiro boot cria `wager_app`; restart preserva o mesmo usuário/dados.
+
+Alterar senhas em `.env` depois do primeiro boot **não altera a senha persistida**.
+Será necessário executar ALTER ROLE explicitamente e ajustar a conexão, preservando
+dados. Não recomendamos apagar o volume para resolver divergência de credenciais.
+
+### Testes reais e helpers
+
+[compose.ts](../infra/test/compose.ts) contém dois helpers de teste, sem papel na aplicação:
+
+| Função | Contrato e fluxo |
+|---|---|
+| `compose(...args)` | Recebe strings de argumentos CLI, retorna Promise<string> com stdout. Usa Bun.spawn sem shell, cwd da raiz via fileURLToPath, coleta stdout/stderr/exit em paralelo; exit não zero lança Error. Chamado pelos testes e pelo helper postgres; depende do CLI Docker/daemon. Não interpola comandos nem imprime a configuração com senhas |
+| `postgres(role)` | Recebe `'admin'` ou `'app'`, retorna Promise<SQL>. Lê `docker compose config --format json`, extrai porta publicada/banco/senha do serviço e cria cliente PostgreSQL nativo Bun, loopback, pool máximo 1 e timeout de conexão 5s. Chamado pelos testes; não é ORM de produção e não substitui MikroORM |
+
+Os callbacks de `Promise.all` são as Promises de leitura e saída do processo,
+não há funções auxiliares ocultas. `fileURLToPath` é necessário porque o caminho
+do projeto contém espaços: `.pathname` produziria `%20`, um diretório inexistente.
+A primeira tentativa dos testes detectou esse erro de cwd; foi corrigido antes do commit.
+
+[postgres.test.ts](../infra/test/postgres.test.ts) tem dois callbacks `async`, sem
+argumentos, retorno Promise<void>, chamados pelo Bun test runner:
+
+1. **SQL autenticado e permissões:** conecta como app, consulta `pg_roles` e exige
+   `wager_app` sem superuser/createdb/createrole. Fecha conexão em finally. Detecta
+   senha/porta/banco incorretos e privilégios excessivos. Falhas SQL/asserções falham o teste.
+2. **Persistência:** cria tabela de prova com nome aleatório e um marcador UUID,
+   insere com parâmetro `$1`, fecha conexão, reinicia o serviço e verifica o marcador
+   com nova conexão. Recria o container com `--force-recreate` e repete a consulta.
+   Em finally remove somente sua tabela e fecha as conexões. O identificador passado
+   a `unsafe` é prefixo constante + UUID sem hífens gerado pelo próprio teste, não
+   entrada do usuário. Não há truncamento de dados do projeto nem remoção de volume.
+
+O segundo teste tem timeout de 120s e reinicia apenas o serviço deste projeto.
+Use-o quando nenhum outro trabalho estiver usando esse banco. Os testes normais
+continuam em `bun run test`; infraestrutura é explícita em `bun run test:infra:postgres`.
+
+### Evidência PostgreSQL desta etapa
+
+- `docker compose config --quiet`: configuração válida.
+- `docker compose up -d --wait --wait-timeout 120 postgres`: serviço healthy.
+- `PGPASSWORD=local_app_only psql -h 127.0.0.1 -p 55432 -U wager_app -d wagering`:
+  conexão real retornou banco `wagering`, usuário `wager_app` e PostgreSQL **17.11**.
+- Consulta de privilégios: `rolsuper=f`, `rolcreatedb=f`, `rolcreaterole=f`.
+- `bun run test:infra:postgres`: **2 passaram, 0 falharam**, incluindo preservação
+  do marcador após restart e após recriação do container (aproximadamente 11,5s).
+
+Referências: [Compose](https://docs.docker.com/reference/compose-file/services/),
+[volumes](https://docs.docker.com/reference/compose-file/volumes/),
+[imagem PostgreSQL](https://hub.docker.com/_/postgres),
+[cliente SQL Bun usado somente nos testes](https://bun.sh/docs/runtime/sql).

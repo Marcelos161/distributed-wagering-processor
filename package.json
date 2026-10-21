@@ -6,12 +6,16 @@
   "packageManager": "bun@1.4.3",
   "engines": { "bun": ">=1.4.3 <2" },
   "scripts": {
+    "infra:up": "docker compose up -d --wait --wait-timeout 120",
+    "infra:down": "docker compose down",
+    "infra:status": "docker compose ps",
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",
     "start:built": "bun dist/main.js",
     "build": "bun x --bun --no-install tsc -p tsconfig.build.json",
     "typecheck": "bun x --bun --no-install tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test ./test",
+    "test:infra:postgres": "bun test ./infra/test/postgres.test.ts",
     "check": "bun run typecheck && bun run test && bun run build"
   },
   "dependencies": {

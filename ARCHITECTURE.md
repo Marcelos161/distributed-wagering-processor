@@ -1,6 +1,6 @@
 # Arquitetura e registro de decisões
 
-Estado em 21/10/2026: **somente a base NestJS foi implementada**. Há decisões
+Estado em 21/10/2026: **base NestJS e infraestrutura PostgreSQL implementadas**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -36,7 +36,7 @@ aplicação; drenagem e visibilidade de mensagens ainda precisam ser implementad
 
 `GET /health/live` é público e retorna `200 {"status":"ok"}` quando o processo
 consegue responder. Nenhum acesso a banco/fila ocorre. `/health/ready` ainda não
-existe (404): não há dependências configuradas para atestar prontidão.
+existe (404): a aplicação ainda não implementa probes das dependências.
 
 Alternativa rejeitada: readiness retornando 200 fixo. Isso permitiria encaminhar
 apostas a uma instância incapaz de persistir. A readiness real virá com PostgreSQL
@@ -143,9 +143,27 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Não existem domínio financeiro, banco, migrations, filas, idempotência, autenticação,
+Não existem domínio financeiro, migrations, filas, idempotência, autenticação,
 reconciliação, métricas ou testes distribuídos. Nenhuma garantia financeira foi
 demonstrada. O teste HTTP real desta etapa não substitui as integrações exigidas.
+
+## ADR-004 — PostgreSQL local persistente (adotada)
+
+Imagem oficial PostgreSQL 17.11 (tag 17-alpine fixada por digest), volume nomeado
+em `/var/lib/postgresql/data`, rede dedicada do Compose e porta loopback 55432.
+As portas 5432/5433 do host já estavam ocupadas por outros projetos; nenhum deles
+foi alterado. Não há mounts de diretórios de outros projetos nem Docker socket.
+
+Alternativa: bind mount para dados; volume nomeado evita depender de permissões e
+layout da máquina. Volume sobrevive a restart/recriação e a `down` sem `--volumes`.
+Credenciais são exclusivamente locais. O usuário `wager_admin` inicializa e migrará
+o schema; `wager_app` conecta sem superuser/createdb/createrole. Grants de tabelas
+pertencem às migrations futuras. O healthcheck faz SELECT 1 autenticado via TCP.
+
+Scripts de init só executam sobre volume vazio. Alterar a senha no Compose não
+migra a credencial persistida; essa alteração requer ALTER ROLE explícito.
+O cliente SQL Bun aparece apenas nos testes de infraestrutura, não na persistência
+da aplicação: a escolha de MikroORM permanece válida.
 
 ## Referências consultadas na base
 
