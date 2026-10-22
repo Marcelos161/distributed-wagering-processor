@@ -1985,3 +1985,468 @@ saldo/version/updatedAt após débito rejeitado de 200.00. Essa sonda usa classe
 reais compiladas; não grava Wallet, OPENING ou ledger no banco. A etapa termina
 aqui: próxima proposta é WagerTransaction, seguida do desenho de persistência e
 constraints, ambos sujeitos a autorização antes de desenvolvimento.
+
+## 15. WagerTransaction — identidade, referências e ciclo de vida
+
+### Escopo, auditoria e decisões aprovadas
+
+Partimos da branch main limpa no commit bdd274a (Wallet). Lemos as seções 6.3 e 7
+no contexto do README completo e inspecionamos as interfaces reais de Money,
+WalletLedgerEntry e Wallet. Money é imutável, compara valores exatamente e pode
+produzir negativos internamente; a transação deve validar seu sinal. Nenhum desses
+três modelos nem seus testes precisou ser modificado. Esta etapa implementa apenas
+a entidade em memória, sem processamento, persistência financeira ou endpoints.
+
+O usuário aprovou três decisões que o esqueleto não fechava:
+
+1. OPENING/BET/WIN/REFUND/ROLLBACK exigem Money positivo; LOSS exige zero. Uma Wallet
+   pode abrir com zero, mas nesse caso não existe transação OPENING.
+2. WIN admite referência opcional a BET processada; o valor do prêmio pode diferir.
+   BET/LOSS/OPENING não recebem referência. markProcessed recebe a entidade da
+   referência, permitindo inspecionar os vínculos em vez de confiar num ID opaco.
+3. PENDING pode aguardar referência uma vez; ambos os estados pendentes podem terminar.
+   Não há retorno para PENDING nem repetição de markPendingReference.
+
+As alternativas e os limites estão na ADR-011. A adaptação adicional de
+ledgerDirectionFor para retornar null representa naturalmente a ausência de ledger.
+createOpening é uma factory interna explícita; não introduz autenticação nem escolhe
+metadados fictícios. O futuro caso de uso fornecerá providerId/roundId/gameId internos
+segundo o contrato a definir. Os adaptadores externos não poderão usar essa factory.
+
+### Kind não é status: máquina de estados
+
+Kind descreve **qual operação** foi pedida: apostar, premiar, registrar perda ou
+reverter. Status descreve **onde ela está** no processamento. Uma BET continua BET
+quando é rejeitada. Uma máquina de estados restringe quais mudanças são possíveis;
+não permite atribuir qualquer string a status.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: create ou createOpening
+    PENDING --> PENDING_REFERENCE: referência externa preenchida
+    PENDING --> PROCESSED: markProcessed
+    PENDING_REFERENCE --> PROCESSED: markProcessed
+    PENDING --> REJECTED: reject
+    PENDING_REFERENCE --> REJECTED: reject
+    PENDING --> FAILED: fail
+    PENDING_REFERENCE --> FAILED: fail
+```
+
+PROCESSED, REJECTED e FAILED são terminais. Todos os seus métodos de transição
+lançam InvalidTransactionStateError, inclusive tentar marcar PROCESSED novamente.
+Isso preserva o resultado auditável e evita que um retry altere uma decisão anterior.
+O futuro replay deve carregar e devolver o resultado original, inclusive o saldo
+daquela operação, sem aplicar outra movimentação.
+
+| Kind | Valor | Referência | Efeito quando processada |
+|---|---|---|---|
+| OPENING | positivo | proibida; criação interna | crédito de abertura |
+| BET | positivo | proibida | débito |
+| WIN | positivo | opcional; BET processada | crédito do prêmio |
+| LOSS | zero | proibida | registra resultado, sem ledger |
+| REFUND | positivo | BET processada, valor integral | crédito de devolução |
+| ROLLBACK | positivo | BET/WIN/REFUND processada, valor integral | inverso da referência |
+
+Exemplo: Wallet com 100.00 BRL, BET de 25.00 deixa 75.00; WIN de 40.50 deixa
+115.50. LOSS não debita novamente: a aposta já produziu o débito. REFUND da BET
+credita os mesmos 25.00. ROLLBACK da BET também credita 25.00; ROLLBACK de WIN
+40.50 debita 40.50; ROLLBACK de REFUND 25.00 debita 25.00. Esses cálculos explicam
+a regra; WagerTransaction não possui saldo nem aplica essas movimentações.
+
+### Referências, ordem de chegada e limites locais
+
+O ID externo identifica a operação no provedor. O ID interno identifica nossa linha.
+Não são intercambiáveis: a futura consulta será por `(providerId, externalId)`;
+após validação, markProcessed registra `reference.id` no referenceTransactionId.
+Provider, jogador, wallet, moeda e rodada devem coincidir. Isso impede, por exemplo,
+devolver a aposta de outro jogador ou associar um prêmio de outra rodada. O gameId
+é preservado, mas não acrescentamos igualdade dele à regra oficial de referência.
+
+REFUND/ROLLBACK só aceitam o valor integral exato; Money.equals só é chamado depois
+de conferir a moeda. WIN pode premiar 99.99 sobre uma BET de 25.00. O fato de sua
+referência ser opcional não permite ignorá-la quando veio preenchida.
+
+Um REFUND que chega primeiro nasce PENDING. Sem referência resolvida, processá-lo
+lança REFERENCE_REQUIRED; uma referência existente ainda pendente gera
+REFERENCE_NOT_PROCESSED. O futuro caso de uso chama markPendingReference, persiste
+e agenda nova tentativa. Quando a BET estiver PROCESSED, poderá concluir o REFUND.
+Se a referência estiver REJECTED/FAILED, é inválida, não uma aposta aplicada.
+A entidade lança INVALID_REFERENCE; a aplicação escolhe registrar a rejeição.
+Nenhum erro de validação muda status automaticamente.
+
+Contagem de tentativas, TTL, backoff e agendamento ainda não existem. Ao esgotar a
+política futura, o caso de uso poderá usar reject(ReferenceNotFound). A entidade
+conhece o código e exige uma referência externa, mas não pode provar que as
+consultas/tentativas ocorreram. Da mesma forma, DuplicateReversal não implica
+consulta: a unicidade global dependerá do banco e do caminho transacional.
+
+### Falhas, identidade e idempotência
+
+REJECTED significa decisão de negócio: a operação não pode ser aplicada. FAILED
+significa falha permanente de infraestrutura, auditável. Não se deve marcar FAILED
+por qualquer timeout transitório; após resultado de commit desconhecido, consultar
+o resultado antes de decidir. Rejeições/falhas não geram ledger.
+
+| FailureCode | Onde pode ser registrado | Exemplo / responsabilidade futura |
+|---|---|---|
+| INSUFFICIENT_FUNDS | reject em BET | apostar 80.00 com saldo 20.00 |
+| REVERSAL_INSUFFICIENT_FUNDS | reject em ROLLBACK | desfazer prêmio de 50.00 com saldo 10.00; REFUND só credita |
+| REFERENCE_NOT_FOUND | reject quando existe referência externa solicitada | esgotamento de tentativas/TTL verificado pelo caso de uso |
+| INVALID_REFERENCE | reject quando existe referência externa solicitada | jogador/rodada diferente ou referência terminal sem sucesso |
+| DUPLICATE_REVERSAL | reject em REFUND/ROLLBACK | banco identifica outra reversão bem-sucedida do mesmo tipo |
+| DOMAIN_RULE_VIOLATION | reject em qualquer kind | regra de domínio sem código específico; preferir específico quando existir |
+| PERMANENT_INFRASTRUCTURE_FAILURE | fail exclusivamente | erro permanente comprovado; não simples falha transitória |
+| IDEMPOTENCY_CONFLICT | admissão/API futura, nunca reject/fail da transação original | mesma chave, conteúdo diferente |
+
+Esses códigos são strings estáveis para máquina, sem números HTTP. Erros de uso da
+classe são WagerTransactionError/InvalidTransactionStateError: não equivalem a um
+resultado persistido automaticamente. INVALID_REFERENCE existe como erro local e
+como FailureCode; o primeiro informa validação, o segundo registra decisão explícita.
+
+idempotencyKey identifica a submissão; payloadHash representa seu conteúdo canônico
+futuro. matchesPayload apenas compara strings exatas. Não normaliza JSON nem calcula
+hash. Mesma key e mesmo hash poderão ser replay; mesma key com hash diferente é
+conflito, preservando o resultado original. A entidade sozinha não procura outra
+transação pela key e não impede duplicata em outro processo. Identidade externa e
+key precisarão de constraints distintas conforme o README.
+
+### Contratos e métodos de produção, um a um
+
+Todos os métodos abaixo pertencem a `src/domain/wagering/wager-transaction.ts`,
+exceto os erros e enum indicados. Tipos monetários são Money; nenhum number guarda
+dinheiro. number nos snapshots representa apenas milissegundos de Date.
+
+**Tipos e configuração:** WagerTransactionKind e WagerTransactionStatus são enums
+com os valores oficiais. CreateWagerTransactionProps contém IDs/hash (string), kind,
+money (Money), referência externa opcional (string), createdAt (Date).
+CreateOpeningTransactionProps omite kind e referência externa. WagerTransactionState
+adiciona status, referenceTransactionId/failureCode/processedAt opcionais. Campos
+opcionais de lifecycle aceitam explicitamente undefined para reinicialização na
+factory sob exactOptionalPropertyTypes. Lifecycle é o snapshot privado readonly:
+status e valores internos opcionais, com tempo em epoch. O Symbol constructionToken
+fica só no módulo e impede new via JavaScript sem a factory; TypeScript private
+sozinho desaparece na compilação. Não é sandbox contra alteração do próprio código.
+
+**constructor(state: WagerTransactionState, token: symbol) → WagerTransaction.**
+Chamado somente pelas factories. Primeiro compara o token, depois valida estrutura;
+copia identidade e Money imutável; converte datas; congela o snapshot; valida a
+coerência do lifecycle e congela o objeto público. Token incorreto dá TypeError;
+dados incorretos dão WagerTransactionError. Não chama Wallet, banco ou transições.
+Object.freeze protege propriedades públicas, enquanto o campo #lifecycle continua
+substituível exclusivamente pelos métodos da classe.
+
+**create(props: CreateWagerTransactionProps) → WagerTransaction.** Futura admissão
+HTTP/SQS e testes chamam esta factory. Confere objeto; recusa kind OPENING com
+INTERNAL_ONLY_KIND; copia os dados e força PENDING, sem referência interna, failureCode
+ou processedAt. Campos de lifecycle injetados por JS não tornam a operação processada.
+O construtor valida os demais dados. Não gera IDs/hash/datas. Exemplo: BET com Money
+25.00 BRL nasce PENDING, ainda sem qualquer débito real.
+
+**createOpening(props: CreateOpeningTransactionProps) → WagerTransaction.** Futuro
+caso de uso de abertura chama esta factory com metadados internos e Money positivo.
+Confere objeto, recusa kind diferente de OPENING ou referência externa inesperada
+(INTERNAL_ONLY_KIND), força OPENING/PENDING e apaga campos de resultado injetados.
+Reutiliza o construtor; zero dá INVALID_AMOUNT. Abertura zero de Wallet não chama
+esta factory. A escolha torna a origem interna explícita sem criar uma camada de
+autenticação nesta etapa.
+
+**rehydrate(state: WagerTransactionState) → WagerTransaction.** Futuros mapeadores
+carregam snapshots persistidos. Chama o construtor com token; admite todos os estados
+coerentes, incluindo OPENING e PROCESSED com uma referência que não está carregada.
+Não chama create, markProcessed, Wallet ou resolução de referências. IDs, enums,
+Money/sinal, datas e coerência dos campos são verificações estruturais; não refaz
+transições, saldo, igualdade com outra transação ou busca de duplicidade. Corrupção
+estrutural lança erros em vez de silenciosamente reconstruir um objeto impossível.
+
+**get status() → WagerTransactionStatus; get referenceTransactionId() → string | undefined;
+get failureCode() → FailureCode | undefined.** Consultas de casos de uso, mapeadores
+e testes; não recebem parâmetros. Leem valores primitivos do snapshot privado, sem
+setters, mudanças ou exceções normais. Referência interna só aparece em PROCESSED;
+falha só em REJECTED/FAILED.
+
+**get createdAt() → Date; get processedAt() → Date | undefined.** Sem parâmetros;
+retornam novas instâncias a partir do epoch. processedAt preserva undefined e aceita
+epoch zero. Caso de uso/mapeador/testes consultam. Alterar o Date retornado não altera
+a entidade; o mesmo vale para o Date recebido na criação/processamento. Não há relógio
+oculto nem validação de ordem temporal entre máquinas.
+
+**markProcessed(reference: WagerTransaction | undefined, at: Date) → void.** Futura
+orquestração chama depois de validar condições do processamento, dentro da unidade
+transacional a projetar. Primeiro bloqueia terminal, valida at, valida referência;
+só então troca #lifecycle por PROCESSED com reference.id, sem failureCode e com epoch
+de at. Sem referência externa exige undefined. Erros INVALID_DATE, REFERENCE_REQUIRED,
+REFERENCE_NOT_PROCESSED ou INVALID_REFERENCE preservam TODO o estado anterior.
+Terminais sempre dão InvalidTransactionStateError antes de validar parâmetros.
+Não aplica saldo nem cria ledger: a conclusão durável dependerá do commit SQL.
+
+**markPendingReference() → void.** Sem parâmetros; caso de uso chama quando precisa
+aguardar a referência. Bloqueia terminal, exige PENDING e referência externa preenchida;
+troca apenas o status. Qualquer outra origem dá InvalidTransactionStateError, incluindo
+repetir a espera. Consultar status em retries evita transições repetidas. Exemplo:
+REFUND de uma BET que ainda não chegou.
+
+**reject(code: FailureCode) → void.** Caso de uso registra decisão de negócio. Bloqueia
+terminal, valida código adequado ao kind/contexto e substitui status/failureCode.
+Não exige relógio nem introduz rejectedAt fora do modelo. INVALID_FAILURE_CODE não
+muda nada. Exemplo: BET sem saldo → INSUFFICIENT_FUNDS. Verifica a compatibilidade
+do código, mas não calcula saldo, duplicidade ou TTL.
+
+**fail(code: FailureCode) → void.** Caso de uso registra falha permanente, depois
+de resolver a situação da tentativa anterior. Bloqueia terminal, aceita somente
+PERMANENT_INFRASTRUCTURE_FAILURE e troca status/failureCode. Outro código dá
+INVALID_FAILURE_CODE sem mutação. Não publica evento nem tenta recuperação automática.
+
+**isTerminal() → boolean.** Sem parâmetros; consulta os três estados terminais.
+Usado por #assertMutable, validação da referência, casos de uso e testes. Nenhum I/O
+ou erro normal. Exemplo: PENDING_REFERENCE retorna false, REJECTED retorna true.
+
+**affectsBalance() → boolean.** Sem parâmetros; false em LOSS/REJECTED/FAILED, true
+nos outros kinds enquanto pendentes ou processados. Chamado por ledgerDirectionFor
+e futuros casos de uso. É descrição de efeito potencial ou já ocorrido, não licença
+para processar novamente nem prova de referência disponível. Não lança normalmente.
+
+**requiresReference() → boolean.** Sem parâmetros; true só em REFUND/ROLLBACK, usado
+na validação de valor integral/código de falha e pelos chamadores externos. WIN continua
+false mesmo se uma referência opcional foi preenchida; nesse caso #assertReference
+ainda exige sua resolução. Não lança normalmente.
+
+**matchesPayload(payloadHash: string) → boolean.** Futura admissão compara o hash
+recebido com o armazenado usando igualdade estrita. Não muta, não lança em divergência,
+não calcula hash nem decide status. Exemplo: `opaque-hash` igual → true; maiúsculas,
+espaço ou outro conteúdo → false. Parâmetro é string já produzido/validado pela borda.
+
+**ledgerDirectionFor(reference?: WagerTransaction) → LedgerDirection | null.** Futura
+orquestração consulta qual método de Wallet chamar. Retorna null imediatamente para
+operações sem efeito. Para demais, valida referência, retorna DEBIT em BET, inverso
+do kind alvo em ROLLBACK, CREDIT nos demais. Não navega recursivamente a referência
+de um REFUND: sabe que REFUND processado creditou. Pode lançar os erros de referência;
+não altera estado, não verifica saldo e não retorna lançamento. Exemplo: ROLLBACK de
+WIN processada → DEBIT; saldo insuficiente dessa reversão será verificado depois.
+
+**#assertMutable() → void.** Helper privado sem parâmetros; chamado primeiro por todas
+as transições. Usa isTerminal e lança InvalidTransactionStateError se true. Não muda
+estado. Justificativa: o resultado terminal não pode depender do conteúdo de um retry.
+
+**#assertReference(reference: WagerTransaction | undefined) → void.** Chamado por
+markProcessed e ledgerDirectionFor. Sem external ID, recusa alvo inesperado. Com ID,
+exige entidade, confere identidade externa, impede autoreferência interna, preserva
+ID interno já registrado, compara os quatro IDs de escopo e a moeda, valida kind,
+valor integral se reversão e status PROCESSED. Falta de entidade → REFERENCE_REQUIRED;
+alvo pendente válido → REFERENCE_NOT_PROCESSED; demais incompatibilidades →
+INVALID_REFERENCE. Não busca banco nem escreve. A ordem evita comparar Money de
+moedas diferentes e reporta vínculo inválido antes de sugerir espera por ele.
+
+**#assertRejectionCode(code: FailureCode) → void.** Chamado por reject e validação de
+snapshots REJECTED. Confere a matriz de códigos acima usando kind e presença de
+referência externa. Incompatibilidade/undefined/valor desconhecido →
+INVALID_FAILURE_CODE. Não verifica a evidência externa da rejeição; isso pertence ao
+caso de uso. Evita persistir IDEMPOTENCY_CONFLICT na operação original.
+
+**#assertLifecycle() → void.** Chamado somente no construtor. Verifica enum status;
+processedAt existe se e somente se PROCESSED; referenceTransactionId só existe em
+PROCESSED e corresponde à presença da referência externa; PENDING_REFERENCE exige
+referência externa; código deve corresponder a REJECTED/FAILED e estar ausente nos
+demais. Lança INVALID_STATE ou INVALID_FAILURE_CODE. Não executa transições, não
+consulta alvo e não exige que o histórico esteja disponível para reidratar.
+
+**static #assertStructure(state: WagerTransactionState) → void.** Construtor chama:
+confere objeto, nove strings obrigatórias, kind conhecido, instância Money, sinal
+conforme kind, datas válidas, formato das referências e proibição de self reference.
+Exige referência externa para reversões e a proíbe em BET/LOSS/OPENING. Não normaliza
+identificadores nem impõe UUID. Erros: INVALID_STATE/IDENTIFIER/KIND/MONEY/AMOUNT/DATE/
+REFERENCE e REFERENCE_REQUIRED. São limites de representação, sem refazer efeito
+financeiro. Delega aos três helpers simples abaixo.
+
+**static #assertObject(value: unknown) → void.** Factories de criação e validação
+estrutural usam para recusar null/undefined/primitivos/arrays com INVALID_STATE.
+Não verifica todos os campos; só permite continuar a inspeção segura do objeto.
+
+**static #assertIdentifier(value: unknown) → void.** Validação estrutural usa para
+IDs, key e hash opacos. Exige string não vazia sem whitespace/controles ASCII;
+INVALID_IDENTIFIER em falha. Não trim, não gera UUID, não infere algoritmo de hash.
+Exemplo: `provider-a:ext-1` preservado; ` ext-1` recusado. Limites máximos de tamanho
+serão definidos com contratos/persistência.
+
+**static #assertDate(value: unknown) → void.** Estrutura e markProcessed usam para
+exigir Date com getTime finito; string ou Invalid Date dá INVALID_DATE. Não altera
+o Date, não compara com o relógio atual. Retorno void; epoch zero é válido.
+
+**WagerTransactionError.constructor(code: WagerTransactionErrorCode, message: string).**
+Arquivo `src/domain/wagering/wager-transaction-error.ts`. Chama Error, guarda code
+readonly, define name. Helpers/factories o lançam; testes e futuros casos de uso
+inspecionam code, não a frase. Não traduz para HTTP nem altera a entidade.
+
+**InvalidTransactionStateError.constructor(message: string).** Mesmo arquivo;
+subclasse que fixa INVALID_TRANSACTION_STATE e name específico. Usada por transições
+ilegais; permite instanceof conforme o esqueleto oficial. Erro de programação em
+replay terminal não deve se transformar em segunda decisão de negócio.
+
+**FailureCode**, em `src/domain/wagering/failure-code.ts`, é enum sem funções ou I/O.
+Distingue resultados persistidos de conflito de admissão, conforme a tabela. Nenhum
+código representa status HTTP. WagerTransactionErrorCode é união de strings para
+violações locais; não precisa de uma hierarquia adicional por cada campo inválido.
+
+### Como a aplicação futura coordenará os modelos
+
+Um futuro caso de uso abrirá uma transação PostgreSQL, identificará a operação e
+seu resultado anterior, obterá o lock da wallet, carregará referências e validará
+unicidade/escopo. Para uma operação nova apta a processar, consultará a direção e
+chamará debit ou credit em Wallet, recebendo o ledger correspondente. LOSS pula a
+movimentação. A conclusão de WagerTransaction e a gravação de Wallet, ledger,
+resultado original, Inbox quando aplicável e Outbox ocorrerão no mesmo commit.
+
+Se qualquer etapa falhar, o rollback SQL impede persistência parcial. Objetos
+mutados em memória não são automaticamente desfeitos pelo PostgreSQL: o caso de uso
+deverá descartá-los/recarregá-los em retry. Nenhum evento será publicado antes do
+commit. Não conectamos esses passos nesta etapa nem alegamos atomicidade financeira.
+
+Futuramente o banco deverá proteger unicidade de key e identidade externa, ledger
+por transação/wallet, sucesso único por referência/tipo, não-negatividade e
+imutabilidade de ledger/terminais. Uma rejeição não deve consumir a possibilidade
+de uma reversão válida posterior. Sem schema, dois objetos independentes podem
+validar a mesma reversão; há um teste explícito desse limite, não um cache simulando
+proteção global. Locks serão por wallet, nunca globais.
+
+### Guia dos helpers e de cada teste
+
+Arquivo único: `test/wager-transaction.test.ts`. Os testes importam as classes reais
+com Bun, sem mocks de Money/Wallet/Ledger nem simulação de PostgreSQL. Cada callback
+de teste retorna void (ou Promise<void> no teste de dependências), é chamado pelo
+runner, e falha se uma expectativa divergir. `test.each` expande parâmetros de
+matriz em casos independentes; os nomes abaixo identificam essas famílias. Cada
+linha descreve entrada, fluxo, erro/retorno esperado e por que a proteção existe.
+
+| Helper | Parâmetros / retorno | Fluxo, dependências, erros e chamadores |
+|---|---|---|
+| money | amount: string = 25.00, currency: string = BRL → Money | chama Money.from; fixtures usam valores exatos; propaga MoneyError se fixture inválida |
+| props | patch: Partial<CreateWagerTransactionProps> = {} → props completos | fornece IDs, hash opaco, Money e Date determinísticos e aplica patch; testes variam só a condição relevante; depende de money |
+| state | patch: Partial<WagerTransactionState> = {} → snapshot | props + PENDING + patch; usado em rehidratação/fixtures; não valida, pois alguns testes precisam de corrupção deliberada |
+| target | kind: Kind = BET, patch: Partial<State> = {} → entidade | constrói snapshot PROCESSED com outra identidade; LOSS zero e reversões com vínculo persistido; rehydrate real pode lançar se a fixture for inválida; usado em matrizes de referência |
+| dependent | kind: Kind = REFUND, patch: Partial<Props> = {} → entidade | cria operação com reference-ext; create real valida; testes de dependência usam/reforçam erros reais |
+| snapshot | tx: WagerTransaction → objeto com campos/JSON/datas/status | captura dados públicos e getters sem expor estado privado; testes comparam antes/depois para provar ausência de mutação; não altera a entidade |
+| expectCode | run: () => unknown, code: ErrorCode → void | executa e captura erro, exige WagerTransactionError + code; para estado inválido exige a subclasse; falha na asserção se não houve erro; usado em testes negativos |
+
+Fixtures são exemplos de snapshots locais, não evidência de linhas no PostgreSQL.
+`target` reidrata uma REFUND processada sem carregar sua própria BET: esse cenário
+exercita justamente a separação entre reidratar e reexecutar transições.
+
+| Teste / família (nome no código) | Parâmetros, passos e resultado validado |
+|---|---|
+| creates ${kind} as PENDING with preserved identity, Money and no outcome | todos os 6 kinds; monta entrada, escolhe factory, compara todos os IDs/Money e campos de lifecycle; comprova origem PENDING e consultas requiresReference/affectsBalance |
+| ${kind} enforces the approved amount policy including internal negative Money | 6 kinds × valores zero/0.01/negativo interno; aceita exatamente a política aprovada, demais INVALID_AMOUNT; impede negativos vindos de subtract/negate |
+| external creation refuses OPENING while the explicit internal factory works | cria OPENING pela borda e recebe INTERNAL_ONLY_KIND; cria internamente, consulta CREDIT e processa; rejeita kind/referência injetados |
+| create strips untrusted lifecycle fields and never admits a terminal snapshot | passa snapshot FAILED com campos de resultado à create; verifica PENDING e todos os resultados apagados; protege admissão contra dados JS extras |
+| ${initial} transitions to ${outcome} with the correct outcome fields | 2 origens × 3 destinos; chama a transição real e confere status, terminal, ref, data e código; não usa atribuição direta |
+| waiting for a reference is explicit, requires a reference and cannot repeat | BET não pode aguardar; WIN com referência pode; segunda espera dá INVALID_TRANSACTION_STATE sem alteração |
+| ${terminal} refuses every transition including reprocessing, preserving the entire snapshot | 3 terminais × todos os métodos/alguns parâmetros inválidos; exige subclasse e estado idêntico; REJECTED/FAILED retornam null/false financeiro |
+| %s requires an external reference at creation | REFUND/ROLLBACK sem ID → REFERENCE_REQUIRED antes de admitir a operação |
+| %s refuses an unrelated external reference | BET/LOSS com referência → INVALID_REFERENCE; LOSS usa zero válido para isolar a regra |
+| %s rejects self references by external ID | WIN/REFUND/ROLLBACK apontando a si → INVALID_REFERENCE |
+| ${kind} cannot process or calculate direction without its supplied external reference resolved | WIN/REFUND/ROLLBACK com ID mas sem alvo → REFERENCE_REQUIRED em ambas as chamadas, snapshot intacto |
+| ${kind} rejects a reference with different %s without mutation | 3 kinds × provider/player/wallet/round/external ID; alvo processado incompatível dá INVALID_REFERENCE em processo e direção |
+| ${kind} rejects currency mismatch, own internal ID and a DTO masquerading as reference | 3 kinds com moeda/ID incompatível, DTO ou null; INVALID_REFERENCE e continua PENDING |
+| reference in %s cannot be consumed and does not automatically reject the dependent operation | alvo PENDING/PENDING_REFERENCE → REFERENCE_NOT_PROCESSED; REJECTED/FAILED → INVALID_REFERENCE; dependente continua PENDING sem código |
+| ${kind} validates target kind %s | 3 dependentes × 6 kinds de alvo; só matriz oficial é aceita; sucesso registra reference.id, erro não processa |
+| %s accepts only the full amount, including exact cents and large amounts | 2 reversões; 24.99/25.01 contra 25.00 falham; 0.01 e valor de 100 dígitos iguais processam preservando centavos |
+| WIN may have no reference or a processed BET with a different prize; gameId is not a reference scope | WIN livre e WIN99.99 contra BET25 processam; diferença de gameId aceita conforme escopo oficial |
+| %s without an external ID refuses an unexpected reference during processing | BET/WIN/LOSS recebem alvo que não pediram; INVALID_REFERENCE sem mutação |
+| LOSS records PROCESSED without financial effect or ledger direction | zero, null antes/depois, PROCESSED sem ref; não confunde perda com segundo débito |
+| $kind with reference $reference has direction $direction before and after processing | BET, WIN, REFUND e 3 variantes ROLLBACK; verifica direção pendente/processada; troca de ID interno após processamento recusada |
+| $kind persists the stable rejection $code and has no ledger effect | 7 pares kind/código válidos; reject guarda código e status, sem efeito/direção; diferencia saldo/reversão/referência |
+| fail accepts only infrastructure code, not %s business outcomes | todos os 8 códigos; só permanente vira FAILED, demais INVALID_FAILURE_CODE mantendo PENDING |
+| reject rejects inappropriate kinds, API conflicts, infra codes and unknown codes without mutation | códigos incompatíveis com BET/REFUND, código de admissão/infra/desconhecido; snapshot preservado e INVALID_FAILURE_CODE |
+| hash comparison is exact and never mutates the original transaction on conflict | hash igual true; caixa/espaço/vazio/diferente false; snapshot intacto e string estável IDEMPOTENCY_CONFLICT |
+| rehydrate restores ${status} without replaying reference resolution or transitions | todos os 5 estados; referência não carregada não impede restauração; pendentes depois podem processar com alvo real |
+| rehydrate rejects incoherent lifecycle snapshot %# | 13 snapshots com status/data/ref/código contraditório; erro esperado em tabela; não aceita corrupção como resultado válido |
+| ${factory} refuses malformed identifier/hash %s without normalization | create/rehydrate × 10 campos; vazio/espaço/controle/tipo errado/null, e undefined nos obrigatórios; INVALID_IDENTIFIER; opcional ausente permanece permitido |
+| ${factory} validates object, kind, Money and timestamps at runtime | 2 factories; arrays/primitivos/null, kind desconhecido, DTO monetário, datas inválidas → erros estáveis; TS não substitui runtime |
+| processing and rehydration reject invalid processed dates without partial changes | Date inválido/string/null/undefined; processar preserva snapshot; rehydrate recusa datas explicitamente inválidas |
+| all fields and dates resist assignment, input mutation and getter mutation | Reflect.set/defineProperty, Date de entrada/getter/rehydrate e DTO Money; nenhuma alteração pública, processedAt conserva instante original |
+| two independent reversals remain locally valid: persistent uniqueness is a future database responsibility | dois REFUND com identidade distinta contra mesma BET são aceitos em memória; evidencia limite e necessidade SQL |
+| direct construction cannot bypass factories even from JavaScript | Reflect.construct sem token/com Symbol novo → TypeError, mesmo descrição textual do Symbol |
+| wager dependency graph uses only domain files and decimal.js, without NestJS or MikroORM | callback async lê imports com parser TS, percorre DFS com Set visitado; cada caminho deve ficar no domínio, único pacote externo decimal.js; dependência indevida/falha de leitura falha teste |
+| a refund arriving before its BET waits and can complete once the same reference is processed | BET real inicialmente PENDING; REFUND falha, aguarda; processa BET e então REFUND; termina CREDIT ligado à mesma identidade |
+| the internal opening factory validates input and initializes its own lifecycle | entradas não objeto dão INVALID_STATE; snapshot terminal injetado resulta OPENING PENDING sem resíduos de resultado |
+
+Não há um teste que afirme unicidade persistente ou atomicidade financeira entregue.
+As regressões de infraestrutura abaixo exercitam a base já existente e não usam as
+novas entidades como tabelas: schema financeiro continua vazio.
+
+### Validação observada — 22/10/2026
+
+Comandos executados na raiz, usando apenas credencial local de desenvolvimento:
+
+```bash
+export PATH="$PWD/.tools/node_modules/.bin:$PATH"
+bun test ./test/wager-transaction.test.ts
+DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering bun run check
+bun run test:infra
+bun run test:orm
+bun run test:migrations
+git diff --check
+```
+
+| Verificação | Resultado observado |
+|---|---|
+| WagerTransaction isolada | 151 passaram, 0 falharam; 1154 expectativas |
+| check | typecheck e build aprovados; 395 testes passaram, 0 falharam; 2270 expectativas |
+| PostgreSQL real | 2 passaram, incluindo SQL autenticado e dados preservados após restart/recriação |
+| SQS em LocalStack real | 4 passaram, incluindo reconciliação, entrega/reentrega/ACK, DLQ e reinício/recriação |
+| MikroORM/Nest real | 2 passaram; usuário restrito aceito e administrativo recusado |
+| Migrations oficiais | 2 passaram; geração/aplicação única/reversão e rollback de lote com falha em banco descartável |
+
+São **405 casos distintos**, 151 novos. A execução isolada repete casos da suíte
+principal e não é contada novamente. Não houve falha de teste em runtime nem
+regressão observada. Durante a implementação, typecheck identificou campos opcionais
+explicitamente undefined sob exactOptionalPropertyTypes; o contrato de snapshot foi
+ajustado para representar isso. Também corrigimos duas tipagens de testes: comparação
+de enum com string literal e conversão intencional de DTO inválido por unknown.
+Não afrouxamos o tsconfig nem as garantias de Money para eliminar os erros.
+
+Executamos ainda `bun --eval` com imports reais do build:
+
+```ts
+import { Money } from './dist/domain/money/money.js';
+import {
+  WagerTransaction as Tx,
+  WagerTransactionKind as Kind,
+} from './dist/domain/wagering/wager-transaction.js';
+
+const common = {
+  providerId: 'provider-a', playerId: 'player-1', walletId: 'wallet-1',
+  roundId: 'round-1', gameId: 'game-1',
+  money: Money.from({ amount: '25.00', currency: 'BRL' }),
+  createdAt: new Date('2026-10-22T12:00:00Z'),
+};
+const bet = Tx.create({ ...common, id: 'bet-1', externalTransactionId: 'bet-ext',
+  idempotencyKey: 'bet-key', payloadHash: 'bet-hash', kind: Kind.Bet });
+const refund = Tx.create({ ...common, id: 'refund-1', externalTransactionId: 'refund-ext',
+  idempotencyKey: 'refund-key', payloadHash: 'refund-hash', kind: Kind.Refund,
+  referenceExternalTransactionId: 'bet-ext' });
+// markProcessed(bet, new Date(0)) agora lança REFERENCE_NOT_PROCESSED.
+refund.markPendingReference();
+bet.markProcessed(undefined, new Date(0));
+refund.markProcessed(bet, new Date(1));
+// Outra tentativa de markProcessed lança INVALID_TRANSACTION_STATE.
+```
+
+A sonda capturou os erros esperados e imprimiu esta saída real:
+
+```text
+REFERENCE_NOT_PROCESSED PENDING
+WAIT PENDING_REFERENCE
+BET PROCESSED DEBIT 25.00 BRL
+REFUND PROCESSED CREDIT bet-1
+INVALID_TRANSACTION_STATE PROCESSED
+HASH true false
+```
+
+Isso comprova execução da entidade compilada, sem movimentar dinheiro nem gravar
+ledger. Hash true/false corresponde a comparar refund-hash e changed.
+O SHA-256 dos 27.497 bytes do enunciado original permaneceu
+47795fce2fc38cae5f1b91368ebaf80b7a2ed1fe147f36704b665faf0613812e;
+o README mudou somente na seção adicional de implementação.
+
+Próxima proposta: desenhar persistência e constraints financeiras, fechar limites
+de armazenamento e plano de escrita atômico antes das migrations. Não iniciamos
+essa etapa, endpoints ou processamento. O desenvolvimento para aqui.

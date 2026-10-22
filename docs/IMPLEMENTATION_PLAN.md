@@ -13,14 +13,14 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após Wallet Aggregate Root
+## Comparação com o README — atualização após WagerTransaction
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
 | PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Schema financeiro e constraints futuros |
-| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Money, WalletLedgerEntry e Wallet implementados; transações/persistência pendentes | Máquina de estados, atomicidade persistente e schema |
-| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Pendente | Fluxos de negócio e reversões |
+| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Money, WalletLedgerEntry, Wallet e WagerTransaction implementados localmente; persistência pendente | Atomicidade persistente e schema |
+| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Kinds, lifecycle, referências e direções locais implementados | Processamento atômico e reversões únicas no banco |
 | Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
 | Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Pendente | Crash após commit antes de ACK |
@@ -43,7 +43,7 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 4 | `feat: implement immutable Money value object` | Concluída: decimal.js, escala 2, BRL/USD/EUR, precisão por operação e 73 testes de Money |
 | 5 | `feat: implement immutable wallet ledger entries` | Concluída: create/rehydrate/isBalanced, estado imutável incluindo Date; 66 testes específicos |
 | 6 | `feat: implement Wallet aggregate with balance invariants` | Concluída: abertura com ledger, debit/credit, versão/datas e rejeições sem efeitos; 81 testes específicos |
-| 7 | `feat: implement wager transaction state machine` | Kinds, transições, estados terminais, failure codes; casos válidos e inválidos |
+| 7 | `feat: implement wager transaction lifecycle and domain rules` | Concluída: factories, estados terminais, referências, direções e códigos; 151 testes específicos |
 | 8 | `feat: enforce financial database constraints` | Persistência/mapeamento e constraints, ledger imutável; tentar violar por SQL direto |
 | 9 | `feat: define versioned integration events` | Classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
 | 10 | `feat: persist transactional outbox records` | Modelo/repositório de Outbox e gravação dentro da mesma transação SQL; sem publicação ainda |
@@ -99,8 +99,8 @@ estão na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md).
 Money exige exatamente duas casas e admite zero; entradas negativas são rejeitadas,
 resultados matemáticos assinados são internos. Foram aprovadas precisão por operação
 sem teto monetário nesta etapa e moedas BRL/USD/EUR (ADR-008). Antes dos contratos
-financeiros/schema, decidir limites de payload/NUMERIC, zero por operação e referências
-opcionais. Concluir Money não autoriza implementar a etapa seguinte automaticamente.
+financeiros/schema, decidir limites de payload/NUMERIC. Zero por operação e referências
+opcionais foram definidos na etapa 7 (ADR-011). Concluir Money não autoriza implementar a etapa seguinte automaticamente.
 
 Etapa 5 autorizada e concluída em 22/10/2026: WalletLedgerEntry reutiliza Money
 sem alterações; ADR-009 documenta create vs rehydrate, cópias defensivas de Date e
@@ -120,3 +120,18 @@ Também foi aprovado usar LocalStack Community anterior sem token, fixado por
 versão/digest, após identificar a exigência de conta nas versões atuais. A ADR-005
 documenta a imagem 4.14.0, o broker descartável e a perda de mensagens no restart
 do emulador. Isso não é garantia de persistência do broker.
+
+
+Etapa 7 autorizada e concluída em 22/10/2026: WagerTransaction mantém Money/Wallet/
+WalletLedgerEntry intactos, implementa lifecycle e validação local de referências.
+Aprovações: positivos exceto LOSS zero; WIN opcional ligado a BET processada;
+markProcessed recebe entidade referenciada; transições sem retorno nem repetição
+para PENDING_REFERENCE. ADR-011 explicita a ausência de garantia global de reversão
+única e separa falhas persistidas de conflito de admissão. Sem controllers, banco
+financeiro, consumers, Inbox/Outbox ou locks implementados.
+
+Próxima etapa proposta: **desenho de persistência e constraints financeiras (8)**,
+com decisão prévia sobre mapeamento, limites NUMERIC/payload, escopos de unicidade,
+proteção de ledger/terminais e caminho de escrita atômico. Só implementar após nova
+autorização. A política de retries/TTL e o snapshot de replay também permanecem
+pendentes em suas etapas. Encerramos o desenvolvimento nesta funcionalidade.

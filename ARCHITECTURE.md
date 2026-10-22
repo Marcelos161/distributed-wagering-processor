@@ -25,7 +25,7 @@ genéricos. Locks pessimistas futuros usarão EM transacional; ainda não implem
 Evidência: Nest + SQL real + HTTP, schema vazio e DDL negado para app em banco
 descartável; credencial admin recusada. Nenhuma tabela criada no banco principal.
 
-Estado em 22/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations, Money, WalletLedgerEntry e Wallet implementados**. Há decisões
+Estado em 22/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations, Money, WalletLedgerEntry, Wallet e WagerTransaction implementados**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -155,11 +155,11 @@ descartável, sem prometer reversão segura de dados reais.
 
 1. A regra explícita 7.4 permite unicidade **por tipo** de reversão. Não impor
    silenciosamente proibição conjunta de REFUND e ROLLBACK da mesma BET.
-2. Definir tratamento de referência existente porém pendente, rejeitada ou falha,
-   além de referência inexistente. `WIN` pode ter referência opcional: definir
-   validação e espera quando ela vier preenchida.
-3. Quantias zero em BET/WIN/REFUND/ROLLBACK não estão completamente especificadas.
-   Definir comportamento em relação a ledger e `version`; abertura zero não gera OPENING.
+2. Política local de referências fechada na ADR-011: WIN opcional validada como BET;
+   dependentes aguardam referências não processadas. Falta implementar resolução,
+   backoff/TTL persistidos e tratamento operacional das referências terminais inválidas.
+3. Política de quantias aprovada na ADR-011: LOSS zero; demais kinds positivos.
+   Abertura de Wallet zero continua válida e não gera OPENING.
 4. Escala de Money fechada nesta etapa: `"25"`/`"25.0"` são rejeitados; exigimos
    exatamente duas casas, conforme o pedido. Zeros à esquerda são normalizados
    na saída; a futura definição de hash canônico deverá considerar essa representação.
@@ -170,7 +170,7 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Money, WalletLedgerEntry e Wallet possuem invariantes locais testadas. Wallet
+Money, WalletLedgerEntry, Wallet e WagerTransaction possuem invariantes locais testadas. Wallet
 produz lançamentos em memória para cada mudança de saldo aceita; não há garantia
 persistente entre entidades nesta etapa.
 Não existem ledger persistido, processamento, migrations de schema financeiro, idempotência, autenticação,
@@ -237,8 +237,8 @@ Duas cópias de Wallet no mesmo saldo/version podem aceitar o mesmo débito: o t
 local demonstra esse limite, sem alegar teste distribuído. Version sozinha não
 faz lock nem UPDATE condicional. O lock pessimista aprovado será adquirido na
 linha da wallet dentro da transação antes de decidir saldo; não foi implementado.
-Constraints, lock e idempotência persistente continuarão necessários. As regras
-BET/WIN/LOSS e máquina de estados WagerTransaction pertencem às próximas etapas.
+Constraints, lock e idempotência persistente continuarão necessários.
+A máquina de estados WagerTransaction foi entregue na ADR-011; processamento de BET/WIN/LOSS continua futuro.
 
 Referências: [transações PostgreSQL](https://www.postgresql.org/docs/17/tutorial-transactions.html),
 [locks por linha](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS).
@@ -470,3 +470,78 @@ Referências: [hooks LocalStack](https://docs.localstack.cloud/aws/customization
 
 As versões exatas também foram consultadas no registro npm e verificadas localmente
 por instalação, typecheck, teste HTTP e execução compilada.
+
+
+## ADR-011 — WagerTransaction e regras locais do ciclo de vida
+
+**Decisões aprovadas em 22/10/2026:** valores positivos em OPENING/BET/WIN/REFUND/
+ROLLBACK; LOSS exatamente zero. Alternativa discutida: admitir zero em operações
+financeiras. A escolha mantém toda operação com efeito monetário apta a gerar um
+ledger positivo. Wallet.open com saldo zero continua sem OPENING.
+
+WIN pode referenciar opcionalmente uma BET processada, validando provider, player,
+wallet, moeda e rodada; o prêmio pode diferir da aposta. BET/LOSS/OPENING não aceitam
+referência. REFUND exige BET; ROLLBACK exige BET/WIN/REFUND; ambos pelo valor integral.
+Não acrescentamos igualdade de gameId: ela não faz parte do escopo exigido em §7.
+
+Alternativa ao ID opaco em markProcessed: receber a **entidade referenciada**, aprovada
+pelo usuário. Isso permite validar os vínculos locais antes de registrar seu ID interno.
+O caso de uso buscará a referência por providerId + referenceExternalTransactionId;
+a entidade não consulta banco. Referência pendente lança REFERENCE_NOT_PROCESSED;
+rejeitada/falha lança INVALID_REFERENCE. Nenhum desses erros muda o estado sozinho.
+
+Máquina aprovada: PENDING → PENDING_REFERENCE apenas com referência externa;
+ambos → PROCESSED/REJECTED/FAILED; sem volta a PENDING e sem repetição da transição
+para PENDING_REFERENCE. Terminais recusam todas as transições, mesmo repetidas ou
+com parâmetros inválidos. Replays deverão retornar o resultado persistido, sem chamar
+markProcessed novamente. Retries verificam status antes de aguardar novamente.
+
+Factory externa create recusa OPENING em runtime; createOpening explicita o fluxo
+interno sem token de provedor nem valores mágicos. IDs, hash e metadados de abertura
+continuam fornecidos pelo futuro caso de uso. Não é barreira de autenticação: futuros
+adaptadores HTTP/SQS devem usar somente create e recusar OPENING. Rehydrate é fronteira
+confiável de persistência, admite OPENING e verifica estrutura/coerência do snapshot,
+sem buscar a referência nem reexecutar transições. Não substitui constraints SQL.
+
+Estado público congelado, identidade/Money somente leitura; datas copiadas por epoch;
+apenas snapshot privado de lifecycle é substituído depois de validar a transição.
+Datas são instantes fornecidos, sem impor ordenação por relógio distribuído. A entidade
+não gera IDs, hash, timestamps, ledger, saldo, eventos ou I/O. Nenhuma mudança em Money,
+Wallet ou WalletLedgerEntry foi necessária.
+
+ledgerDirectionFor retorna **LedgerDirection | null**: LOSS/REJECTED/FAILED não geram
+lançamento. BET débito; OPENING/WIN/REFUND crédito; ROLLBACK inverte a referência
+(BET → crédito, WIN/REFUND → débito). Referências preenchidas são verificadas também
+nessa consulta; no estado PROCESSED, devem coincidir com o ID interno já registrado.
+Alternativa de lançar erro em LOSS descartada: ausência de lançamento é resultado
+normal. affectsBalance indica efeito potencial/histórico, não autorização de reaplicar
+PROCESSED nem prova de saldo disponível em PENDING_REFERENCE.
+
+FailureCode separa rejeições de negócio de FAILED permanente de infraestrutura.
+INSUFFICIENT_FUNDS só BET; REVERSAL_INSUFFICIENT_FUNDS só ROLLBACK (REFUND apenas
+credita); REFERENCE_NOT_FOUND/INVALID_REFERENCE exigem referência externa;
+DUPLICATE_REVERSAL apenas REFUND/ROLLBACK; DOMAIN_RULE_VIOLATION é rejeição geral.
+PERMANENT_INFRASTRUCTURE_FAILURE é exclusivo de fail. IDEMPOTENCY_CONFLICT é código
+de admissão/API futura: nunca altera a transação original para REJECTED/FAILED.
+Erros de validação/transição são exceções de domínio e não respostas HTTP.
+
+**Limites e trabalho futuro:** matchesPayload compara hashes opacos exatamente,
+sem calcular/canonicalizar JSON. Unicidade da key no escopo aprovado, identidade
+(provider_id, external_transaction_id), reversão bem-sucedida única por
+(reference_transaction_id, kind), FK de referência e ledger único por
+(transaction_id, wallet_id) dependerão do schema. O índice de reversão deve reservar
+somente sucesso, permitindo auditar rejeições e tentativas inválidas sem consumi-lo;
+o desenho exato será discutido antes da migration. REFUND e ROLLBACK são tipos
+separados: não adicionamos bloqueio conjunto da mesma BET. Constraints devem proteger
+amount/currency/status, coerência de lifecycle e imutabilidade de resultados terminais.
+Saldo não negativo e ledger imutável continuam requisitos do banco, além das classes.
+
+O futuro caso de uso validará saldo, duplicidade, retries/TTL e obterá o lock da Wallet.
+Persistirá saldo, ledger, status, resultado original, inbox/outbox na mesma transação
+SQL. Falha permanente só depois de determinar o resultado da tentativa anterior:
+commit de resultado desconhecido exige consulta/reconciliação, nunca marcar FAILED
+cegamente. Falha transitória permanece recuperável. Não implementado nesta etapa.
+
+**Evidência local:** suíte dedicada ao lifecycle, referências e encapsulamento, com
+cenário que aceita duas reversões em objetos independentes para mostrar o limite da
+entidade. Resultados e comandos reais estão na seção 15 do LEARNING_GUIDE.
