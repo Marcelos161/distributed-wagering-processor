@@ -25,7 +25,7 @@ genéricos. Locks pessimistas futuros usarão EM transacional; ainda não implem
 Evidência: Nest + SQL real + HTTP, schema vazio e DDL negado para app em banco
 descartável; credencial admin recusada. Nenhuma tabela criada no banco principal.
 
-Estado em 22/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations, Money e WalletLedgerEntry implementados**. Há decisões
+Estado em 22/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations, Money, WalletLedgerEntry e Wallet implementados**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -170,12 +170,78 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Money e WalletLedgerEntry possuem aritmética, validação e imutabilidade testadas.
-Não existem Wallet, ledger persistido, processamento, migrations de schema financeiro, idempotência, autenticação,
+Money, WalletLedgerEntry e Wallet possuem invariantes locais testadas. Wallet
+produz lançamentos em memória para cada mudança de saldo aceita; não há garantia
+persistente entre entidades nesta etapa.
+Não existem ledger persistido, processamento, migrations de schema financeiro, idempotência, autenticação,
 reconciliação, métricas ou testes distribuídos. As garantias financeiras entre
 entidades continuam pendentes. Os testes reais de infraestrutura provam conexão, configuração,
 mensageria, persistência PostgreSQL e rollback de migrations/transações de prova;
 não provam atomicidade financeira entre wallet, ledger, inbox e outbox.
+
+## ADR-010 — Wallet, abertura com lançamento e confirmação local do estado
+
+**Contrato aprovado pelo usuário em 22/10/2026:** Wallet.open retorna
+{wallet,openingEntry}. Abertura positiva exige IDs de ledger/transação e retorna
+um CREDIT de zero até o saldo inicial; zero retorna null e recusa contexto de
+movimento desnecessário. O outro caminho considerado foi retornar só Wallet e
+deixar a geração do ledger no caso de uso. O par mantém o requisito de histórico
+explícito já na criação do domínio. Não cria/simula WagerTransaction OPENING.
+Version inicia em 1 em ambos os casos: open não chama credit.
+
+O futuro caso de uso reservará IDs, criará OPENING com o mesmo transactionId do
+lançamento, e persistirá Wallet+OPENING+ledger em uma única transação. Zero não
+gera OPENING/ledger. Banco deverá assegurar a correspondência entre alteração
+de saldo e entrada financeira, inclusive abertura, além de UNIQUE(player_id,currency),
+CHECK saldo >= 0, FK, equação e unicidade do ledger. O desenho concreto de constraint
+diferida/escrita SQL controlada será decidido na persistência e testado por SQL
+direto. A existência de um objeto resultado não impede seu descarte pelo chamador.
+
+Wallet é Entity/Aggregate Root: identidade/moeda são fixas, saldo/version/updatedAt
+mudam somente por debit/credit. Money e WalletLedgerEntry permanecem inalterados.
+Inputs de movimento incluem Money, IDs de ledger/transação e Date fornecido;
+retorno {entry,walletVersion} guarda a versão correspondente àquela entrada.
+Não há lista de ledger em memória, bus de eventos, repository ou interface genérica.
+
+O helper privado valida objeto, Money, moeda, positividade, data, capacidade de
+incremento de version e saldo suficiente em débito; calcula o novo Money; cria
+ledger real; prepara snapshot e resultado; só então substitui #state uma vez.
+Nenhuma validação/alocação/callback/I/O ocorre depois dessa troca. Alternativa de
+mutar saldo/versão/data separadamente e tentar desfazer ao capturar erros foi
+descartada: preparar tudo antes simplifica a garantia local e seus testes.
+O estado permanece igual quando a factory de ledger falha, comprovado com IDs
+inválidos reais, sem mocks. Insuficiência lança WalletError/INSUFFICIENT_FUNDS.
+
+Superfície pública congelada; campos privados permitem transições controladas.
+Balance retorna Money imutável; createdAt/updatedAt devolvem Date novos a partir
+de instantes privados. Datas são fornecidas pelo chamador e apenas validadas como
+instantes finitos, seguindo a política do ledger: não garantem monotonicidade ou
+ordem causal. updatedAt reflete o último movimento aceito, mesmo se relógio recuar.
+IDs mantêm política opaca sem whitespace/controles, sem impor UUID ou gerar valores.
+Version é inteiro positivo seguro; MAX_SAFE_INTEGER impede novo movimento antes
+de qualquer alteração. Esses números são metadados, nunca quantias financeiras.
+
+Rehydrate reconstrói estado com checks estruturais, sem abrir carteira, emitir
+lançamento ou exigir OPENING. É fronteira confiável da futura persistência, não
+factory para aceitar financiamento externo. Preserva version e datas recebidas.
+Nenhuma consulta de unicidade ou idempotência em memória é introduzida.
+
+### Limite da atomicidade e concorrência
+
+As garantias desta etapa são locais à chamada síncrona. Uma falha SQL posterior
+não desfaz Wallet JavaScript já alterada: o caso de uso deve descartar a instância
+e recarregar após rollback antes de retry. A transação PostgreSQL protegerá os
+registros persistidos, incluindo ledger/transação/inbox/outbox quando existirem.
+
+Duas cópias de Wallet no mesmo saldo/version podem aceitar o mesmo débito: o teste
+local demonstra esse limite, sem alegar teste distribuído. Version sozinha não
+faz lock nem UPDATE condicional. O lock pessimista aprovado será adquirido na
+linha da wallet dentro da transação antes de decidir saldo; não foi implementado.
+Constraints, lock e idempotência persistente continuarão necessários. As regras
+BET/WIN/LOSS e máquina de estados WagerTransaction pertencem às próximas etapas.
+
+Referências: [transações PostgreSQL](https://www.postgresql.org/docs/17/tutorial-transactions.html),
+[locks por linha](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS).
 
 ## ADR-009 — Lançamento imutável, criação validada e reconstrução de estado
 

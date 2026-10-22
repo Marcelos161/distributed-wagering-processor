@@ -61,9 +61,10 @@ para containers; não é necessário para a execução local atual.
 | `bun run dev` | Reinicia ao alterar arquivos |
 | `bun run start` | Executa o entrypoint TypeScript com Bun |
 | `bun run typecheck` | Checa tipos de fontes e testes sem emitir JS |
-| `bun run test` | Executa 163 casos: Money, WalletLedgerEntry, configuração e HTTP real; exige DATABASE_URL + PostgreSQL |
+| `bun run test` | Executa 244 casos: Money, WalletLedgerEntry, Wallet, configuração e HTTP real; exige DATABASE_URL + PostgreSQL |
 | `bun test ./test/money.test.ts` | 73 testes unitários de Money; não exige Docker, Nest ou variáveis de banco |
 | `bun test ./test/wallet-ledger-entry.test.ts` | 66 testes de lançamentos, reidratação, imutabilidade e dependências; sem serviços externos |
+| `bun test ./test/wallet.test.ts` | 81 testes de abertura, movimentação, versão, datas e preservação de estado; sem serviços externos |
 | `bun run build` | Compila fontes em dist com checagem de tipos |
 | `bun run start:built` | Executa dist/main.js; exige build anterior |
 | `bun run check` | Typecheck, testes e build, nessa ordem; interrompe na primeira falha |

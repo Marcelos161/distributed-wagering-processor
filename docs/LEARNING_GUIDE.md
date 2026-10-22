@@ -1570,3 +1570,418 @@ cópia foi alterada. A última linha consulta isBalanced no estado reidratado co
 after 74.99. Nenhuma dessas sondas grava lançamento financeiro no PostgreSQL.
 Diff revisado, links locais conferidos e hash do README oficial original preservado.
 Próxima etapa: Wallet Aggregate Root, somente após autorização; não implementada.
+
+## 14. Wallet Aggregate Root: saldo e lançamento por uma única operação de domínio
+
+### Auditoria e decisão de abertura
+
+Partimos de main limpa no commit `89bd638`. Conferimos o README e os fontes de
+Money/WalletLedgerEntry. Ambos foram reutilizados **sem modificações**. Não há
+nova dependência, migration, controller, worker, WagerTransaction ou caso de uso
+BET/WIN/LOSS nesta etapa. Os nomes de aposta/prêmio nos exemplos dão contexto à
+aritmética; não representam processamento persistente implementado.
+
+Foi apresentada a alternativa de open retornar apenas Wallet e delegar todo o
+lançamento ao caso de uso. O usuário aprovou o contrato **{ wallet, openingEntry }**:
+saldo positivo exige IDs de transação/lançamento e retorna CREDIT em memória;
+saldo zero retorna null, sem movimento. Assim o domínio não entrega uma abertura
+positiva pelo caminho open sem produzir o lançamento correspondente. Nenhuma
+transação OPENING é simulada ou marcada como persistida.
+
+### Aggregate Root, Entity e Value Object
+
+Um agregado reúne estado e regras que precisam permanecer consistentes. Sua
+**Aggregate Root** é a porta pública para as mudanças: o chamador solicita debit
+ou credit, em vez de alterar balance e tentar lembrar de todas as verificações.
+Wallet é essa raiz. Ela coordena Money, saldo/version/data e a criação do registro
+financeiro correspondente; não carrega uma lista ilimitada de lançamentos antigos.
+
+Wallet é uma **Entity** porque tem identidade: wallet-1 continua sendo wallet-1
+depois de gastar 25.00. Money é um **Value Object**: 100.00 BRL e 75.00 BRL são
+valores diferentes; a subtração produz outro objeto. WalletLedgerEntry é um
+registro com identidade e sem transições. A Wallet muda por métodos; o registro
+retornado de uma mudança anterior continua intacto.
+
+Um setter balance permitiria criar dinheiro, pular validação de moeda, deixar
+saldo negativo, esquecer ledger ou version. Por isso o saldo é um getter de Money
+imutável. debit/credit pertencem ao domínio porque expressam essas regras, que
+devem ser as mesmas independentemente de entrada HTTP, fila ou outro caso de uso.
+O domínio não abre conexão, não publica evento e não depende de NestJS/MikroORM.
+
+### Contratos e adaptação das assinaturas
+
+Em [wallet.ts](../src/domain/wallet/wallet.ts), os contratos são interfaces readonly:
+
+| Tipo | Campos e finalidade |
+|---|---|
+| WalletState | id, playerId, currency, balance: Money, version: number, createdAt/updatedAt: Date; entrada da reidratação |
+| OpenWalletProps | id, playerId, initialBalance: Money, at: Date, opening?: {ledgerEntryId,transactionId}; entrada de abertura |
+| WalletOpeningResult | wallet: Wallet e openingEntry: WalletLedgerEntry ou null; resultado da abertura |
+| WalletMovementProps | ledgerEntryId, transactionId, money: Money, at: Date; dados para débito/crédito |
+| WalletMovementResult | entry: WalletLedgerEntry e walletVersion: number; resultado imutável de uma movimentação aceita |
+| MutableState (interno) | balance, version, updatedAtMilliseconds; snapshot readonly substituído por inteiro a cada sucesso |
+
+open difere do esqueleto ao retornar o par aprovado e receber at/IDs de abertura.
+debit/credit recebem identidades e instante porque ledger exige esses campos.
+Retornam lançamento e versão daquele movimento: ler wallet.version muito depois
+poderia observar outra operação. Saldo anterior/posterior, moeda, data e identidade
+da wallet já estão no lançamento, sem duplicação no resultado.
+
+Objetos resultado são Object.freeze. O par de abertura contém uma referência à
+Wallet **mutável por métodos**, não um snapshot permanente do saldo; openingEntry
+é o registro imutável da abertura. Não há lista de eventos ou Unit of Work de domínio.
+
+### Ordem de execução e ausência de estado parcial
+
+O helper #applyMovement é síncrono e segue esta sequência:
+
+1. Valida objeto de entrada, Money, moeda e movimento estritamente positivo.
+2. Valida Date e disponibilidade de próxima versão representável exatamente.
+3. Em débito, verifica saldo suficiente antes da subtração.
+4. Calcula novo Money por subtract/add, mantendo a referência do saldo antigo.
+5. Chama **WalletLedgerEntry.create real**, que valida IDs, sinais e equação.
+6. Prepara/congela o próximo snapshot e o resultado {entry,walletVersion}.
+7. Faz uma única atribuição `this.#state = nextState` e retorna o resultado pronto.
+
+Toda validação, cálculo e alocação está antes do passo 7. Se a criação do ledger
+falhar, ainda não houve atribuição ao estado. Não precisamos desfazer três campos
+mutados sequencialmente nem capturar erro para corrigir saldo. Após a substituição
+não há callback, await, I/O, validação ou nova alocação no fluxo do método.
+
+Os testes passam ID inválido à factory **real** do ledger: ela lança depois do
+cálculo e a Wallet conserva saldo, versão e datas. Isso demonstra a ordem por seu
+efeito observável; não usamos mock de sucesso/falha para substituir Money ou ledger.
+Falhas de validação anteriores também são comparadas com snapshot completo.
+
+Essa garantia vale para a conclusão/falha de uma chamada no objeto em memória.
+Não fornece durabilidade, transação entre processos nem recuperação de crash.
+Se o processo morrer após alterar memória, não há commit SQL implícito.
+
+### Versão, datas e proteção do estado
+
+Version começa em **1**, inclusive em abertura financiada. open constrói o CREDIT
+diretamente; não chama credit, o que incrementaria indevidamente a versão inicial.
+Cada movimento aceito é positivo e muda o saldo exatamente, portanto incrementa
+uma vez. Zero/negativo são rejeitados; rejeições não mudam version nem updatedAt.
+
+Version é inteiro positivo seguro de JavaScript; isso é metadado, não dinheiro.
+Rehydrate rejeita valores fracionários, não finitos e acima de MAX_SAFE_INTEGER.
+Uma wallet já no máximo rejeita movimento com VERSION_EXHAUSTED antes de mudar
+estado. Esse limite técnico evita perder incrementos; não define o tipo SQL futuro.
+
+IDs/currency são readonly e a superfície da Wallet é congelada. Os campos privados
+ECMAScript continuam acessíveis aos métodos da classe mesmo com Object.freeze:
+congelar a superfície não torna o agregado inteiro imutável. #state só é trocado
+pelo helper; seus próprios campos são congelados. Token Symbol não exportado
+protege também o construtor em JavaScript. Não é sandbox contra código malicioso
+com controle arbitrário do processo ou protótipos.
+
+createdAt/updatedAt guardam instantes numéricos privados e getters retornam Date
+novos. Alterar a entrada ou a cópia devolvida não altera a Wallet. createdAt nunca
+muda; updatedAt recebe o instante fornecido em cada sucesso. Não usamos Date.now.
+Seguindo o contrato temporal do ledger, aceitamos Date válido, sem pressupor
+monotonicidade de relógio: instantes podem ser iguais ou recuar. Isso não transforma
+timestamp em ordem de commit. Version acompanha as mudanças locais; a futura
+aplicação deverá escolher o relógio de processamento e o schema definirá sequência.
+
+### Cada função, factory, getter e helper
+
+As funções de produção abaixo ficam em [wallet.ts](../src/domain/wallet/wallet.ts),
+exceto WalletError. Seus chamadores atuais são testes; Wallet será chamada por
+casos de uso, e rehydrate por um mapeador de persistência, ambos ainda futuros.
+Não se aceita DTO monetário no lugar de Money. Inputs tipados ainda recebem
+validação runtime para chamadas JavaScript/dados indevidos.
+
+#### WalletError.constructor(code, message)
+
+Arquivo: [wallet-error.ts](../src/domain/wallet/wallet-error.ts). Recebe
+WalletErrorCode e string, chama super(message), guarda code readonly e define
+name='WalletError'. Produz Error de domínio, sem validação de negócio própria.
+Usado pelas factories/helpers; consumidores podem decidir por code, sem analisar
+mensagens nem depender de HTTP. Exemplo: INSUFFICIENT_FUNDS para débito excessivo.
+
+Códigos: INVALID_STATE, INVALID_IDENTIFIER, INVALID_MONEY, NEGATIVE_BALANCE,
+CURRENCY_MISMATCH, INVALID_DATE, INVALID_VERSION, VERSION_EXHAUSTED,
+NON_POSITIVE_MOVEMENT, INSUFFICIENT_FUNDS e INVALID_OPENING_CONTEXT. Erros do
+WalletLedgerEntry, como INVALID_IDENTIFIER, propagam como LedgerEntryError:
+não escondemos sua origem nem inventamos um resultado de sucesso. Falhas técnicas
+de recursos/decimal também propagam, antes da troca de estado.
+
+#### private constructor(state: WalletState, token)
+
+Recebe estado e Symbol interno; retorna a instância por construção, sem tipo de
+retorno explícito. Valida token, objeto, IDs, Money não negativo, igualdade da
+moeda com balance, versão segura positiva e datas. Copia IDs/moeda/createdAt,
+monta #state congelado e congela this. Não retém o objeto de entrada nem os Dates.
+Chamado por open/rehydrate. Token incorreto lança TypeError; campos inválidos
+lançam os códigos correspondentes de WalletError. Exemplo: versão 7 pode ser
+restaurada, sem se tornar 1 ou produzir sete lançamentos.
+
+#### static open(props: OpenWalletProps): WalletOpeningResult
+
+Valida objeto/saldo inicial, deriva moeda do Money e constrói Wallet com versão 1
+e as duas datas iguais a at. Se saldo positivo, exige opening como objeto e cria
+um CREDIT de zero até o saldo inicial com IDs fornecidos. Se zero, opening deve
+estar ausente e o lançamento é null. Congela e retorna o par somente quando tudo
+passa. Exemplo: 100.00 BRL produz CREDIT 100.00 e wallet.version=1.
+
+Erros: objeto/saldo/identidade/data inválidos; saldo negativo; contexto de abertura
+ausente/malformado em abertura positiva ou presente em abertura zero; IDs de
+lançamento inválidos rejeitados pelo ledger. Uma instância local construída antes
+de falhar o ledger não é exposta ao chamador. Não chama rehydrate/credit, gera
+transação ou toca no banco. Será usada pelo caso de uso de abertura atômica.
+
+#### static rehydrate(state: WalletState): Wallet
+
+Delega ao construtor e retorna uma nova instância com saldo, versão e instantes
+preservados. Só valida estado estrutural: não chama open, não exige IDs OPENING,
+não recria ledger nem reaplica regras de débito passadas. Exemplo: saldo 100.00,
+version 7 continua assim até uma próxima operação. Erros estruturais são os do
+construtor. O futuro mapeador só deve usar este caminho para dados persistidos
+confiáveis; não é alternativa para financiar carteiras sem histórico.
+
+#### get balance(): Money
+
+Sem parâmetros, devolve #state.balance, já imutável. Não precisa copiar Money;
+não há nova validação/erro de domínio. Usado por consumidores e #applyMovement.
+Exemplo: `wallet.balance.add(valor)` cria outro Money, não credita a Wallet.
+Isso permite leitura sem oferecer um setter de saldo.
+
+#### get version(): number
+
+Sem parâmetros, retorna #state.version; não incrementa nem consulta banco.
+Usado por aplicação e testes. Exemplo: retorna 2 após primeiro movimento aceito.
+Sem validação nova ou erro de domínio; o valor foi validado na criação/transição.
+
+#### get createdAt(): Date / get updatedAt(): Date
+
+Sem parâmetros; cada um retorna new Date do seu instante privado. Não validam
+de novo nem lançam erro de domínio em estado válido. Usados por consumidores e
+futuro mapeador. Exemplo: `wallet.updatedAt.setTime(0)` modifica somente a cópia.
+createdAt é fixo; updatedAt reflete o último movimento aceito pelo objeto.
+
+#### debit(props: WalletMovementProps): WalletMovementResult
+
+Delega a #applyMovement com LedgerDirection.Debit. O helper valida moeda/valor,
+saldo suficiente e ledger, depois confirma estado. Exemplo: saldo 100.00,
+movimento 25.00 → saldo 75.00 e entrada DEBIT; excesso → INSUFFICIENT_FUNDS.
+Retorna entrada e versão do sucesso. Qualquer erro do helper/ledger propaga sem
+efeito parcial. Será usado pelo caso de uso após resolver transação e concorrência.
+
+#### credit(props: WalletMovementProps): WalletMovementResult
+
+Delega a #applyMovement com Credit; exige valor positivo/mesma moeda, sem teste
+de insuficiência. Exemplo: 75.00 + 40.50 → 115.50 e CREDIT. Retorno e erros seguem
+o helper. Não classifica a operação como WIN/REFUND/OPENING nem publica eventos.
+Essa classificação pertence à futura transação e camada de aplicação.
+
+#### private assertSameCurrency(money: Money): void
+
+Compara money.currency com this.currency; retorna undefined se iguais ou lança
+CURRENCY_MISMATCH. Chamado por #applyMovement depois de validar instanceof Money.
+Exemplo: débito USD numa Wallet BRL é recusado, sem conversão cambial.
+
+#### #applyMovement(props, direction): WalletMovementResult
+
+Helper privado em runtime, usado por debit/credit com direção já determinada.
+Recebe WalletMovementProps e LedgerDirection. Executa os sete passos da seção de
+atomicidade acima, devolvendo resultado congelado. Valida objeto, Money, moeda,
+positividade, data, capacidade da versão e saldo em débito. IDs de transação e
+lançamento são validados pela factory real do ledger, antes de qualquer mutação.
+Erros possíveis incluem WalletError e LedgerEntryError. Exemplo: ID de ledger
+vazio falha após cálculo, deixando o saldo original e a versão intactos.
+
+O resultado é preparado antes da troca de #state. Não há lista interna de
+lançamentos: o futuro caso de uso deve persistir o resultado junto da Wallet.
+Chamadas duplicadas não são deduplicadas em memória; idempotência persistente e
+UNIQUE(transaction_id,wallet_id) ainda precisarão existir no banco.
+
+#### static #assertObject(value: unknown): void
+
+Exige objeto não nulo/não array. Usado por construtor, open e #applyMovement.
+Retorna undefined ou INVALID_STATE. Exemplo: null é recusado antes de acessar
+balance. Não valida todos os campos; cada etapa valida os que utiliza.
+
+#### static #assertIdentifier(value: string, field: string): void
+
+Exige string não vazia sem whitespace/controles ASCII, sem trim ou geração de ID.
+Chamado pelo construtor para id/playerId. Retorna undefined ou INVALID_IDENTIFIER,
+com nome do campo, sem incluir conteúdo do payload. Exemplo: 'player-1' aceito,
+' player-1' rejeitado. Mantém política de IDs opacos já usada no ledger.
+
+#### static #assertBalance(value: Money): void
+
+Exige instanceof Money e !isNegative. Chamado por open e construtor; retorna
+undefined ou INVALID_MONEY/NEGATIVE_BALANCE. Zero é permitido. Exemplo: Money
+negativo produzido por negate não pode entrar como saldo inicial/persistido.
+
+#### static #timestamp(value: Date): number
+
+Exige Date e getTime finito; retorna os milissegundos ou lança INVALID_DATE.
+Chamado pelo construtor e #applyMovement. Exemplo: Date inválido rejeitado antes
+de alterar estado. Não representa dinheiro nem consulta relógio atual.
+
+### Exemplo completo: abertura, aposta, prêmio e rejeição
+
+```ts
+const { wallet, openingEntry } = Wallet.open({
+  id: 'wallet-1', playerId: 'player-1',
+  initialBalance: Money.from({ amount: '100.00', currency: 'BRL' }),
+  at: new Date('2026-10-22T12:00:00Z'),
+  opening: { ledgerEntryId: 'entry-opening', transactionId: 'tx-opening' },
+});
+const debit = wallet.debit({
+  ledgerEntryId: 'entry-bet', transactionId: 'tx-bet',
+  money: Money.from({ amount: '25.00', currency: 'BRL' }),
+  at: new Date('2026-10-22T12:01:00Z'),
+});
+const credit = wallet.credit({
+  ledgerEntryId: 'entry-win', transactionId: 'tx-win',
+  money: Money.from({ amount: '40.50', currency: 'BRL' }),
+  at: new Date('2026-10-22T12:02:00Z'),
+});
+// openingEntry: CREDIT 0.00 → 100.00; versão inicial 1
+// debit.entry: DEBIT 100.00 → 75.00; debit.walletVersion=2
+// credit.entry: CREDIT 75.00 → 115.50; credit.walletVersion=3
+// wallet.balance = 115.50 BRL; wallet.version = 3
+```
+
+Uma tentativa seguinte de debitar 200.00 lança INSUFFICIENT_FUNDS: saldo continua
+115.50, versão continua 3 e updatedAt continua 12:02. O lançamento anterior não
+muda. O exemplo não cria WagerTransaction nem comprova que os IDs existam no banco.
+
+### Persistência futura: não deixar saldo financiado sem histórico
+
+O resultado de open obriga o caminho de domínio a produzir o CREDIT, mas um objeto
+em memória não consegue impedir que um programador descarte openingEntry ou use
+rehydrate indevidamente. A garantia persistente precisará do seguinte protocolo:
+
+1. Caso de uso inicia a transação SQL e reserva identidades internas.
+2. Chama open; se houver openingEntry, cria a WagerTransaction OPENING com o mesmo
+   transactionId, valor, carteira e moeda.
+3. Insere Wallet, OPENING e ledger na **mesma transação**; abertura zero insere
+   Wallet sem OPENING/ledger. Inclui Outbox quando essa parte existir.
+4. Faz commit somente se todo o conjunto passar. Erro provoca rollback do conjunto.
+
+Banco exigirá UNIQUE(player_id,currency), não negatividade, chaves estrangeiras,
+unicidade do lançamento por transação/carteira e proteção do ledger, além do
+desenho entre tabelas que impeça saldo sem lançamento. FK sozinha não obriga uma
+wallet a ter ledger; a correspondência exigirá constraint diferida/caminho SQL de
+escrita controlado, a decidir no schema e provar por tentativas SQL diretas.
+
+Se uma transação SQL falhar **depois** que Wallet.debit/credit retornou, PostgreSQL
+não reverte automaticamente o objeto JavaScript. O caso de uso deverá descartar
+essa instância/transação de trabalho e recarregar estado antes de retry. Não
+reutilizar uma Wallet já alterada após rollback. Não introduzimos compensação em
+memória, repositório ou Unit of Work próprio para antecipar essa camada.
+
+### Concorrência: o que esta etapa não garante
+
+No mesmo objeto, cada chamada síncrona observa seu estado atual. Duas cópias
+carregadas com 100.00/version 7 podem ambas debitar 80.00 e chegar localmente a
+20.00/version 8. Um teste explícito demonstra isso; não é um teste de concorrência
+distribuída nem uma solução de race condition.
+
+O lock pessimista por carteira já aprovado será adquirido na linha PostgreSQL
+dentro da transação, antes de ler/decidir o saldo. Outra transação da mesma wallet
+aguardará e avaliará o estado confirmado; wallets diferentes poderão avançar.
+Version é metadado útil, mas incrementar um contador local não adquire lock nem
+faz comparação condicional no banco. Não implementamos nenhum lock nesta etapa.
+
+Transação SQL protege o conjunto persistido; lock protege a disputa concorrente;
+constraints protegem as invariantes contra caminhos de escrita indevidos. Nenhum
+desses papéis é substituído por Object.freeze, FIFO, getters ou um contador local.
+
+### Testes: helpers, callbacks e evidências por cenário
+
+Arquivo: [wallet.test.ts](../test/wallet.test.ts). Nenhum mock de Money, ledger ou
+banco; testes de domínio não acessam infraestrutura. `money(amount,currency='BRL')`
+retorna Money.from e propaga MoneyError. `opening(overrides={})` retorna
+OpenWalletProps novos para saldo 100.00 com IDs/data fixos; `persisted(overrides={})`
+retorna WalletState novo com saldo 100.00/version 7 e datas fixas;
+`movement(overrides={})` retorna WalletMovementProps de 25.00 com IDs/data fixos.
+Os três recebem Partial do contrato, retornam objetos sem validar overrides e
+são usados para criar casos válidos/ inválidos, sem compartilhamento mutável de Date.
+
+`snapshot(wallet)` retorna DTO com IDs, moeda, saldo serializado, versão e datas
+ISO. É usado para comparar todo o estado observável antes/depois de erros.
+`expectCode(run: () => unknown, code: WalletErrorCode): void` executa callback,
+captura erro e exige instanceof/name/code; ausência de throw faz expect falhar.
+Os helpers são síncronos; erros de setup/assertions propagam ao Bun.
+
+Callbacks test retornam void, sem argumentos. test.each recebe o campo/valor/caso
+da tabela. Loops de métodos ('debit','credit') e factories ('open','rehydrate')
+registram os mesmos contratos relevantes para ambos. Casts existem nos testes
+para simular input runtime inválido; não são usados para contornar produção.
+
+| Grupo | Prova |
+|---|---|
+| Abertura zero e positiva | Version 1, identidades/datas, moeda derivada, null ou CREDIT equilibrado de zero ao saldo |
+| Contexto de abertura | Positiva sem objeto válido é rejeitada; zero com IDs de movimento é rejeitada; IDs inválidos falham no ledger |
+| Inicial negativo | Money negativo interno não é admitido como saldo |
+| Três moedas/decimais | 0.10 + 0.20 = 0.30 e débito inverso em BRL/USD/EUR |
+| Débito e crédito encadeados | Saldo, direção, IDs, instante e versão correspondem ao lançamento; resultados anteriores não mudam |
+| Débito exato/insuficiente | Zerar saldo é válido; excesso é INSUFFICIENT_FUNDS sem mudanças, inclusive após sucesso anterior |
+| Oito inputs inválidos × dois métodos | Zero, negativo, moeda, DTO/money ausente e datas inválidas deixam todo estado intacto |
+| Erro real de ledger × dois IDs × dois métodos | Factory falha depois do cálculo; saldo/versão/data preservados; operação seguinte válida funciona |
+| Versão máxima e último incremento | Não há arredondamento/overflow do contador nem mutação após esgotá-lo |
+| Inputs malformados | Null, undefined, array e string rejeitados em operações/factories |
+| Reidratação | Preserva identidade/saldo/version/datas sem replay de abertura; primeira operação usa versão restaurada |
+| Versão/estado inválidos | Rejeita versão não segura/positiva, saldo negativo, moeda divergente/ausente, DTO de saldo |
+| IDs | Cada ID é validado sem geração, trim ou normalização |
+| Imutabilidade externa | Não é possível atribuir saldo/versão/IDs/datas; mutações das entradas, Dates devolvidos e DTO monetário não alteram estado |
+| Datas em sucessos | updatedAt acompanha o instante fornecido e createdAt permanece; timestamp não é relógio monotônico |
+| Valores grandes | 100 dígitos inteiros e centavo com transporte/subtração exatos |
+| Duas cópias | Demonstra que versão sozinha não resolve conflito entre instâncias |
+| Token | Reflect.construct sem token correto não cria Wallet |
+| Dependências | Grafo estático de imports permanece em domain e decimal.js; sem Nest/MikroORM |
+
+No último teste, callback async retorna Promise<void>: readFile lê cada fonte;
+ts.preProcessFile extrai imports; pending/visited percorrem sem repetir; resolve
+converte imports .js relativos para fontes .ts e exige caminho dentro de domain.
+Pacote externo só pode ser decimal.js. Erros de leitura/assertions propagam.
+TypeScript, fs/path/url são utilizados apenas pelo teste, não pela Wallet.
+
+Referências para a camada futura:
+[transações PostgreSQL](https://www.postgresql.org/docs/17/tutorial-transactions.html),
+[locks por linha](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS).
+
+### Validação observada da Wallet — 22/10/2026
+
+```bash
+export PATH="$PWD/.tools/node_modules/.bin:$PATH"
+bun test ./test/wallet.test.ts
+DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering bun run check
+bun run test:infra
+bun run test:orm
+bun run test:migrations
+```
+
+| Verificação | Resultado real |
+|---|---|
+| Wallet isolada | 81 passaram, 0 falharam; 490 expectativas |
+| check | Typecheck aprovado; 244 testes passaram, 0 falharam; 1116 expectativas; build aprovado |
+| PostgreSQL/SQS | 2 + 4 passaram; serviços reais, inclusive reinícios/recriação |
+| ORM | 2 passaram |
+| Migrations | 2 passaram, somente bancos descartáveis |
+
+Total da rodada: **254 casos distintos**, incluindo **81 novos**. O comando isolado
+repete esses casos e não entra duas vezes no total. Money e WalletLedgerEntry,
+incluindo seus testes, não foram modificados. Nenhuma regressão ou falha foi
+observada nesta rodada; os serviços já estavam healthy na auditoria inicial.
+
+Também executamos com `bun --eval` o exemplo importando Wallet e Money compilados
+de dist/domain. Saída real:
+
+```text
+OPEN 100.00 BRL 1 CREDIT true
+DEBIT 75.00 BRL 2 true
+CREDIT 115.50 BRL 3 true
+INSUFFICIENT_FUNDS 115.50 BRL 3 2026-10-22T12:02:00.000Z
+```
+
+True verifica isBalanced no lançamento; a última linha comprova preservação de
+saldo/version/updatedAt após débito rejeitado de 200.00. Essa sonda usa classes
+reais compiladas; não grava Wallet, OPENING ou ledger no banco. A etapa termina
+aqui: próxima proposta é WagerTransaction, seguida do desenho de persistência e
+constraints, ambos sujeitos a autorização antes de desenvolvimento.

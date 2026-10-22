@@ -747,7 +747,7 @@ Teste de carga também conta como diferencial. Se fizer, exponha como `bun run t
 
 ---
 
-## Implementação do candidato — etapas 1 a 5
+## Implementação do candidato — etapas 1 a 6
 
 O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
 `GET /health/live`, PostgreSQL persistente e SQS FIFO/DLQ em LocalStack Community
@@ -755,9 +755,11 @@ O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
 de migrations configurada e validada em bancos descartáveis. Money é imutável,
 usa decimal.js e aceita contratos com escala 2 em BRL/USD/EUR; tem testes unitários
 independentes de infraestrutura. WalletLedgerEntry modela lançamentos imutáveis,
-com criação validada e reidratação. Wallet, ledger persistido, processamento e schema
-financeiro permanecem pendentes. Para estudar só Money: `bun test ./test/money.test.ts`;
-para lançamentos: `bun test ./test/wallet-ledger-entry.test.ts`.
+com criação validada e reidratação. Wallet controla saldo/versão localmente e retorna
+o lançamento em abertura positiva, débito e crédito. Ledger persistido, transações
+de apostas, processamento e schema financeiro permanecem pendentes. Para estudar
+só Money: `bun test ./test/money.test.ts`; lançamentos:
+`bun test ./test/wallet-ledger-entry.test.ts`; Wallet: `bun test ./test/wallet.test.ts`.
 
 Com Bun 1.4.3 disponível, execute na raiz:
 
