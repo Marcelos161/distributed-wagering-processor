@@ -25,7 +25,7 @@ genéricos. Locks pessimistas futuros usarão EM transacional; ainda não implem
 Evidência: Nest + SQL real + HTTP, schema vazio e DDL negado para app em banco
 descartável; credencial admin recusada. Nenhuma tabela criada no banco principal.
 
-Estado em 21/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations e Money implementados**. Há decisões
+Estado em 22/10/2026: **NestJS, PostgreSQL/SQS, MikroORM, migrations, Money e WalletLedgerEntry implementados**. Há decisões
 aprovadas para etapas futuras e propostas ainda em avaliação; nenhuma delas
 representa garantia já entregue. Fonte de requisitos: [README](README.md).
 Plano e rastreabilidade: [IMPLEMENTATION_PLAN](docs/IMPLEMENTATION_PLAN.md).
@@ -170,12 +170,74 @@ descartável, sem prometer reversão segura de dados reais.
 
 ## Limitações atuais
 
-Money possui aritmética exata, validação e imutabilidade testadas. Não existem Wallet,
-ledger, processamento, migrations de schema financeiro, idempotência, autenticação,
+Money e WalletLedgerEntry possuem aritmética, validação e imutabilidade testadas.
+Não existem Wallet, ledger persistido, processamento, migrations de schema financeiro, idempotência, autenticação,
 reconciliação, métricas ou testes distribuídos. As garantias financeiras entre
 entidades continuam pendentes. Os testes reais de infraestrutura provam conexão, configuração,
 mensageria, persistência PostgreSQL e rollback de migrations/transações de prova;
 não provam atomicidade financeira entre wallet, ledger, inbox e outbox.
+
+## ADR-009 — Lançamento imutável, criação validada e reconstrução de estado
+
+Implementado WalletLedgerEntry em domain/wallet, sem Wallet ou dependência Nest/ORM.
+Reutiliza Money inalterado. Enum LedgerDirection.Debit/Credit tem valores DEBIT/CREDIT,
+conforme o esqueleto. Estado contém IDs, direção, três Money e createdAt. Interfaces
+readonly e alias CreateLedgerEntryProps evitam duplicação de formatos idênticos.
+
+create exige objeto, IDs string não vazios sem whitespace/controles ASCII, direção
+conhecida, Date válido, instâncias Money, mesma moeda, movimento > 0 e saldos >= 0;
+depois valida before ± money = after. Não gera IDs/tempo, não arredonda e não corrige
+saldo. IDs opacos preservam a assinatura string sem impor UUID não exigido no README.
+Unicidade/existência das referências não são verificáveis neste modelo isolado.
+
+rehydrate preserva estado e faz as mesmas verificações estruturais, incluindo
+sinais/moeda, mas não chama create nem recalcula a equação. Assim não repete a
+transição; isBalanced pode detectar divergência histórica sem corrigir dados.
+Foi descartado delegar rehydrate a create, pois repetiria essa validação. Também
+não aceitamos estrutura arbitrária sem validar tipos/invariantes permanentes.
+Uma divergência aritmética reidratada não autoriza nova gravação: o futuro mapeador
+será fronteira confiável e o banco também exigirá equação consistente. Não existe
+verificação de origem confiável em um objeto TypeScript por si só.
+
+Imutabilidade: campos readonly, Object.freeze, Money imutável compartilhado e
+instante privado em milissegundos. createdAt é getter que devolve Date novo;
+Object.freeze aplicado apenas a Date não bloquearia métodos mutadores. Mantemos
+a API Date do README sem criar abstração temporal adicional. O number privado
+representa tempo, nunca dinheiro. Token Symbol não exportado protege construtor
+também em runtime. Nenhum setter, método de transição ou efeito colateral externo.
+
+LedgerEntryError fornece códigos locais, sem hierarquia genérica nem HTTP.
+isBalanced usa somente add/subtract/equals de Money e retorna boolean; não compara
+float, não tolera diferenças e não garante a continuidade entre linhas de histórico.
+
+### Requisitos de persistência futura — ainda não implementados
+
+- PK(id), NOT NULL nos campos e UNIQUE(transaction_id, wallet_id). Não duplicar
+  o índice que a constraint única já fornecerá.
+- FKs para wallet e transação, preservando histórico sem CASCADE de exclusão;
+  verificar pertencimento da transação à wallet e igualdade de moeda, possivelmente
+  com referências compostas, a definir no desenho do schema.
+- Valores exatos/FINITOS, movimento > 0, saldos >= 0, direção DEBIT/CREDIT e CHECK
+  da equação na própria linha. Definir precisão NUMERIC e rejeição de entradas com
+  escala excessiva antes de qualquer coerção/arredondamento do banco. Moeda única
+  por linha pode representar os três Money; precisa corresponder às referências.
+- Índice (wallet_id, created_at, id) proposto para extrato paginado com desempate.
+  Timestamp/id não provam ordem causal: sequência/version da Wallet será decidida
+  junto à persistência. Não prometemos ordenação por commit com esse índice.
+- Impedir UPDATE/DELETE/TRUNCATE do ledger com privilégios e proteção SQL a testar,
+  inclusive caminhos indiretos e papel real da aplicação, que não será dono/admin.
+- Escrita de saldo + ledger + transação/inbox/outbox em mesma transação PostgreSQL,
+  com lock por wallet aprovado. Verificar correspondência entre mudanças e entradas,
+  continuidade de saldo e ausência de lançamentos para LOSS/rejeitadas no desenho
+  de escrita controlada/constraints entre tabelas; CHECK de linha sozinho não basta.
+
+Uma transação gera no máximo uma entrada por wallet; essa garantia é futura UNIQUE,
+não coleção em memória. Abertura positiva gera CREDIT via futura Wallet/use case.
+Atomicidade entre tabelas e proteção contra escrita SQL direta ainda exigem testes
+de integração e concorrência. Não criamos migrations, repositório ou fluxo financeiro.
+
+Referências de desenho: [constraints PostgreSQL 17](https://www.postgresql.org/docs/17/ddl-constraints.html),
+[transações PostgreSQL 17](https://www.postgresql.org/docs/17/tutorial-transactions.html).
 
 ## ADR-008 — Money decimal imutável e contratos externos restritos (adotada)
 

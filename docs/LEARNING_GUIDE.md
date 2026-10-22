@@ -1255,3 +1255,318 @@ Também executamos o exemplo com `bun --eval`, importando a classe compilada de
 Isso verifica o mesmo exemplo na saída ESM do build, não apenas no TypeScript do
 test runner. Encerramos esta etapa em Money; o próximo item do plano é o modelo
 imutável de lançamento de ledger, antes da Wallet, sujeito a nova autorização.
+
+## 13. WalletLedgerEntry: histórico financeiro imutável
+
+### Auditoria inicial e escopo
+
+Partimos da branch main limpa, no commit `85a0ba8` de Money. README oficial e
+interfaces reais foram conferidos. Money já oferece soma, subtração, comparação,
+predicados de sinal e imutabilidade; seus fontes e testes não foram alterados.
+Não criamos Wallet, transação de aposta, repositório, endpoint, worker ou migration.
+
+O README §6.4 pede um registro com identidade, moeda/quantias encapsuladas em
+Money e duas factories. Seguimos as assinaturas; createdAt passou de campo Date
+para getter Date, preservando o acesso `entry.createdAt` e protegendo o estado.
+O enum usa os nomes do esqueleto `LedgerDirection.Debit`/`Credit`, cujos valores
+são `DEBIT`/`CREDIT`. Não é um enum de operações BET/WIN/LOSS.
+
+### Ledger, saldo e Wallet
+
+**Ledger** é o histórico de movimentos efetivos. Cada entrada responde: qual
+carteira, qual transação, qual direção, quanto, qual saldo antes/depois e quando?
+O **saldo atual** é um valor materializado para consulta e tomada de decisão.
+O histórico permite reconstruí-lo e investigar como ele foi alcançado.
+
+Exemplo: abertura CREDIT 100.00 (0.00 → 100.00), aposta DEBIT 25.00
+(100.00 → 75.00), prêmio CREDIT 40.50 (75.00 → 115.50). O saldo atual é 115.50;
+o ledger contém os três fatos que explicam esse saldo. Esses movimentos são
+exemplos; não há processamento de apostas nesta classe.
+
+**Wallet** será o agregado responsável por autorizar mudanças de saldo e produzir
+o lançamento correspondente. **WalletLedgerEntry** é um registro desse efeito,
+com identidade e sem transições. É diferente de Money, um Value Object definido
+por valor/moeda. Não implementamos partidas dobradas, opcionais no README.
+
+Registros imutáveis mantêm a trilha histórica: uma correção deve ser uma operação
+compensatória explícita, não uma alteração silenciosa do fato anterior. Auditoria
+financeira envolve rastrear transações, conferir equações, procurar duplicatas,
+reconstruir saldos e comparar com o saldo materializado. Esta classe possibilita
+conferir uma linha; não implementa reconciliação de toda a carteira.
+
+Uma operação rejeitada não mudou o saldo, portanto não deve gerar uma entrada de
+movimentação. Seu motivo continuará auditável na futura WagerTransaction. LOSS
+também não move dinheiro. Esta classe não recebe status/kind e não consegue
+verificar essas regras sozinha: o futuro caso de uso e o banco precisarão garanti-las.
+
+### create e rehydrate têm responsabilidades diferentes
+
+**create** valida estrutura e a equação da movimentação. Para débito, before -
+money deve ser exatamente after; para crédito, before + money deve ser after.
+Não arredonda nem corrige um saldo incorreto. Movimento é estritamente positivo;
+ambos os saldos são não negativos e as três quantias têm a mesma moeda.
+
+**rehydrate** reconstrói dados persistidos, sem executar novamente essa equação,
+autorizar aposta, verificar saldo atual ou produzir efeitos. Não chama create.
+Mantém verificações estruturais permanentes: campos/tipos válidos, identificadores,
+direção, data válida, instâncias Money, moeda única, movimento positivo e saldos
+não negativos. Nesta implementação, sinais e moeda definem um estado admissível
+de registro; a equação representa a transição que create valida.
+
+Um estado positivo e da mesma moeda com 100.00 - 25.00 = 74.99 pode ser reidratado:
+`isBalanced()` retorna false e os valores originais permanecem disponíveis para
+diagnóstico. create recusa esse mesmo estado. Isso é deliberado e testado.
+Rehydrate é uma fronteira de persistência confiável, não um caminho de aceitação
+de comandos externos; o futuro repositório não deverá inserir objetos arbitrários
+reidratados para contornar create. A constraint SQL também rejeitará essa equação.
+
+Alternativa de rehydrate delegar a create repetiria a validação da transição,
+contrariando a separação do README. Alternativa de aceitar qualquer objeto sem
+checagem permitiria estado inutilizável. As validações estruturais escolhidas não
+comprovam procedência do dado nem substituem a integridade do banco.
+
+### Campos, data e identidade
+
+Em [wallet-ledger-entry.ts](../src/domain/wallet/wallet-ledger-entry.ts),
+`LedgerEntryState` é interface readonly com os oito campos exigidos.
+`CreateLedgerEntryProps` é alias desse formato: criação e reconstrução têm os
+mesmos dados, mas semânticas diferentes; não duplicamos interfaces idênticas.
+
+IDs são strings opacas, não vazias, sem whitespace ou controles ASCII. Não
+normalizamos com trim nem geramos IDs na factory. O README usa string e não exige
+UUID; impor uma versão de UUID agora acoplaria uma decisão futura de geração e
+persistência. `entry-1` e UUIDs válidos podem ser usados. Existência, unicidade e
+pertencimento das referências não podem ser comprovados por esta classe isolada.
+
+O chamador fornece createdAt: não usamos relógio global, garantindo testes
+determinísticos e preservação do instante na reidratação. Aceitamos Date finita;
+não rejeitamos uma data por ser futura/passada, pois isso seria outra regra.
+Internamente guardamos `#createdAtMilliseconds`, um número de tempo, **não dinheiro**.
+Cada acesso a createdAt devolve novo Date. Congelar um Date sozinho não impede
+setTime/setUTCFullYear de alterar seu instante, daí a cópia defensiva.
+
+Os sete outros campos são readonly; Object.freeze impede reatribuição, remoção
+e redefinição na instância em runtime. Money já é imutável, então pode ser
+compartilhado sem clonagem ou acesso a Decimal. Alterar DTO de Money não o altera.
+O construtor privado também recebe Symbol interno, como Money, para impedir
+construção direta via JavaScript/Reflect. Não há setters ou métodos de transição.
+Classes/protótipos não são uma sandbox contra código arbitrário malicioso no processo.
+
+### Cada função, método e factory
+
+Todos os métodos abaixo são síncronos. Chamadores atuais são os testes; os
+chamadores de aplicação/persistência descritos são futuros. Falhas técnicas de
+Money/recursos propagam; não são convertidas em saldo zero ou lançamentos válidos.
+
+#### LedgerEntryError.constructor(code, message)
+
+Arquivo: [ledger-entry-error.ts](../src/domain/wallet/ledger-entry-error.ts).
+Recebe `LedgerEntryErrorCode` e mensagem string; produz Error de domínio. Chama
+super(message), guarda code readonly e define name='LedgerEntryError'. Não faz
+validação financeira nem importa framework. Usado pelo validador e por create.
+
+Códigos: INVALID_STATE, INVALID_IDENTIFIER, INVALID_DIRECTION, INVALID_MONEY,
+INVALID_CREATED_AT, NON_POSITIVE_MOVEMENT, NEGATIVE_BALANCE, CURRENCY_MISMATCH,
+UNBALANCED_ENTRY. Permitem ao consumidor distinguir causas sem interpretar texto.
+Exemplo: movimento zero lança NON_POSITIVE_MOVEMENT. Não há taxonomia de falhas
+de apostas nem mapeamento HTTP nesta etapa; mensagens não incluem payload financeiro.
+
+#### WalletLedgerEntry.constructor(state, token)
+
+Arquivo: [wallet-ledger-entry.ts](../src/domain/wallet/wallet-ledger-entry.ts).
+Privado; recebe LedgerEntryState e o Symbol interno. Construtor produz a instância,
+sem anotação explícita de retorno. Primeiro recusa token diferente com TypeError;
+depois chama #assertState, copia os sete campos, extrai getTime e congela this.
+Chamado exclusivamente pelas factories. Erros estruturais propagam como
+LedgerEntryError. Não retém o objeto state nem o Date recebidos. Exemplo: a factory
+constrói o lançamento entry-1 sem manter uma referência mutável ao DTO de entrada.
+
+#### static create(props: CreateLedgerEntryProps): WalletLedgerEntry
+
+Cria novo fato válido. Instancia pelo construtor, executa isBalanced e retorna o
+registro somente quando true. False lança UNBALANCED_ENTRY; os erros estruturais
+do construtor continuam possíveis. A instância temporária inválida não é entregue.
+Será usada pela Wallet para produzir entradas. Exemplo: DEBIT 25.00 sobre 100.00,
+com after 75.00, é aceito; after 74.99 é recusado. Não escolhe IDs/data, não altera
+saldo da Wallet, não grava banco nem verifica unicidade entre objetos.
+
+#### static rehydrate(state: LedgerEntryState): WalletLedgerEntry
+
+Recebe estado previamente persistido e devolve nova instância com mesmos dados.
+Chama apenas o construtor; não chama create/isBalanced. Pode lançar os erros
+estruturais, mas não UNBALANCED_ENTRY. Será usada pelo mapeador do repositório,
+que converterá colunas exatas em Money. Exemplo: conserva id/data e saldo 74.99
+de um registro divergente para inspeção; isBalanced revela false. Não conserta
+nem reaplica a operação histórica.
+
+#### get createdAt(): Date
+
+Sem parâmetros; retorna `new Date(this.#createdAtMilliseconds)`. Sem novas
+validações ou erros de domínio, pois o instante já foi validado. Usado por
+consumidores/mapeadores. Exemplo: `entry.createdAt.setTime(0)` modifica apenas
+a cópia, e uma leitura seguinte continua devolvendo o instante original.
+A assinatura de leitura do README permanece Date; não criamos um Value Object de tempo.
+
+#### isBalanced(): boolean
+
+Sem parâmetros. Escolhe subtract para Debit ou add para Credit, sempre com Money,
+e compara o resultado com balanceAfter por equals. Retorna true/false sem mutar
+estado. Chamado por create, testes e futura auditoria. Não reexecuta #assertState:
+direção/tipos/moedas já foram validados pelo construtor. A comparação exata não
+usa tolerância nem conversão para number. Exemplo: 0.10 + 0.20 = 0.30 é true.
+Este método verifica a equação local, não a continuidade do ledger inteiro.
+
+#### static #assertState(state: LedgerEntryState): void
+
+Helper privado em runtime, chamado pelo construtor nas duas factories. Retorna
+undefined se válido. Ordem: exige objeto não nulo/não array; percorre os três
+IDs e valida strings; confere direction; valida Date/getTime finito; percorre
+money/balanceBefore/balanceAfter exigindo instanceof Money; compara moedas;
+exige money.isPositive; rejeita saldos com isNegative. Cada falha lança o código
+correspondente descrito acima; a primeira falha interrompe o fluxo.
+Não usa duck typing de DTO monetário nem recria Money de uma quantia negativa.
+Exemplo: `{ money: { amount: '25.00', currency: 'BRL' } }` é recusado; o chamador
+deve fornecer Money real. Não consulta serviços nem valida transições passadas.
+
+### Exemplo executável de aposta e prêmio
+
+```ts
+const at = new Date('2026-10-22T12:00:00.000Z');
+const debit = WalletLedgerEntry.create({
+  id: 'entry-bet', walletId: 'wallet-1', transactionId: 'tx-bet',
+  direction: LedgerDirection.Debit,
+  money: Money.from({ amount: '25.00', currency: 'BRL' }),
+  balanceBefore: Money.from({ amount: '100.00', currency: 'BRL' }),
+  balanceAfter: Money.from({ amount: '75.00', currency: 'BRL' }),
+  createdAt: at,
+});
+const credit = WalletLedgerEntry.create({
+  id: 'entry-win', walletId: debit.walletId, transactionId: 'tx-win',
+  direction: LedgerDirection.Credit,
+  money: Money.from({ amount: '40.50', currency: 'BRL' }),
+  balanceBefore: debit.balanceAfter,
+  balanceAfter: Money.from({ amount: '115.50', currency: 'BRL' }),
+  createdAt: at,
+});
+// debit.isBalanced() → true; credit.isBalanced() → true
+// credit.balanceAfter.toString() → '115.50 BRL'
+```
+
+A mesma data é permitida: timestamps não são identificadores únicos nem garantem
+ordem de commit. O exemplo compõe registros; não executa BET/WIN de verdade.
+
+### Testes e helpers
+
+Arquivo: [wallet-ledger-entry.test.ts](../test/wallet-ledger-entry.test.ts).
+`amount(value: string, currency='BRL'): Money` chama Money.from; usado para montar
+fixtures legíveis e propaga MoneyError. `state(overrides: Partial<LedgerEntryState>
+= {}): LedgerEntryState` cria uma fixture nova (DEBIT 25, 100 → 75, IDs e data fixos)
+e sobrepõe campos; cada chamada cria Date/Money independentes. Não valida overrides:
+isso permite exercitar entradas inválidas. `expectCode(run: () => unknown, code):
+void` executa callback, captura erro e exige classe/name/code. Se não houver erro,
+o próprio expect falha; não há falso sucesso por ausência de throw.
+
+Callbacks test comuns não recebem argumentos e retornam void. Os test.each recebem
+direction, currency, field ou objeto de caso conforme a tabela. Casts nos casos
+inválidos simulam runtime/JSON, não enfraquecem os tipos de produção. Falhas de
+assertion propagam ao Bun; não há mocks de Money, Nest ou PostgreSQL.
+
+| Teste/grupo | O que comprova |
+|---|---|
+| Débito válido | Todos os campos, identidade/data e equação 100 - 25 = 75 |
+| Crédito de prêmio | 75 + 40.50 = 115.50, preservando saldo anterior |
+| Abertura e débito até zero | Crédito desde zero permitido; débito que zera saldo permitido |
+| Equação incorreta (2 direções) | create rejeita; rehydrate preserva e isBalanced retorna false |
+| 19 casos inválidos × 2 factories | Direção inválida, zero/negativo de negate/subtract, saldos negativos, moeda divergente em cada posição, data inválida e tipo Money incorreto |
+| 4 estados malformados × 2 factories | Null, undefined, array e string rejeitados |
+| 3 campos de ID × 2 factories | Para cada campo: vazio, espaços, controles, null, undefined e number recusados sem normalização |
+| Imutabilidade × 2 factories | Reflect.set em todos os campos, remoção/redefinição, mutação do input, Date original/retornado e DTO monetário não alteram o registro |
+| Reidratação válida | Nova referência, mesmos IDs, direção, Money e instante, equação true |
+| Decimais × BRL/USD/EUR | 0.10 + 0.20 = 0.30 e débito inverso sem erro binário |
+| Valor grande | Soma de um centavo com transporte além de 30 dígitos preservada |
+| Construção direta | Reflect.construct sem token ou com outro Symbol lança TypeError |
+| Grafo de dependências | Percorre imports reais do modelo e dependências de domínio; único pacote externo permitido é decimal.js |
+
+No teste de dependências, callback async retorna Promise<void>. Lê fontes com
+readFile; ts.preProcessFile extrai imports; uma pilha pending e Set visited evitam
+repetição; resolve imports relativos .js para fontes .ts e exige caminho dentro
+de src/domain. Imports de pacote devem ser decimal.js. Falhas de leitura/import
+ou assertions fazem o teste falhar. TypeScript/fs/path são dependências do teste,
+não do domínio. Esse teste cobre o grafo estático de imports, não constitui sandbox
+de execução de código arbitrário. O suite isolado executa sem iniciar Nest/ORM.
+
+### Integração e garantias futuras do PostgreSQL
+
+Uma transação SQL agrupará aquisição do lock por wallet, leitura/validação,
+atualização do saldo e inserção do lançamento, além de transação/inbox/outbox
+quando aplicáveis. Se o INSERT falhar, deve haver rollback também do saldo.
+Se tudo passar, commit torna o conjunto persistido. Nenhum evento será publicado
+antes disso. Atomicidade precisa de uma transação compartilhada; chamadas SQL
+independentes não garantem o conjunto. O lock já aprovado protege a disputa entre
+processos, algo que esta classe imutável em memória não resolve.
+
+O schema futuro precisará de PK do id; NOT NULL; UNIQUE(transaction_id,wallet_id);
+FKs sem exclusão em cascata do histórico; valores exatos e finitos, movimento > 0,
+saldos >= 0, direction válida e CHECK da equação. Uma moeda por linha pode
+representar as três quantias; deve também corresponder à wallet/transação.
+CHECK local não prova correspondência entre tabelas, ausência de ledger para
+LOSS/rejeitadas nem existência de ledger para toda alteração de saldo. Esses
+requisitos exigirão desenho de escrita controlada/constraints apropriadas e
+testes SQL diretos. Não basta afirmar que a aplicação sempre chama create.
+
+Planejar índice (wallet_id, created_at, id) para extrato com desempate estável;
+isso não prova ordem causal. A sequência de movimentos/versão da Wallet será
+definida junto ao schema. UNIQUE já fornece índice próprio, sem duplicação inútil.
+Imutabilidade persistente precisará bloquear UPDATE/DELETE/TRUNCATE, inclusive
+caminhos indiretos; privilégios e proteção SQL serão testados com o papel da app.
+O papel de execução não será dono/superusuário. Nenhuma dessas constraints,
+índices ou políticas financeiras foi criada ou validada nesta etapa.
+
+Referências: [transações PostgreSQL 17](https://www.postgresql.org/docs/17/tutorial-transactions.html),
+[constraints PostgreSQL 17](https://www.postgresql.org/docs/17/ddl-constraints.html).
+
+### Validação observada — 22/10/2026
+
+Primeira rodada: os testes de domínio passaram, mas o setup HTTP falhou com
+`ECONNREFUSED 127.0.0.1:55432`. `docker compose ps` mostrou os serviços parados.
+Executamos `docker compose up -d --wait --wait-timeout 120`, preservando o volume;
+PostgreSQL e LocalStack ficaram healthy. Nenhum código foi alterado para esconder
+a falha. Depois repetimos a rodada completa:
+
+```bash
+export PATH="$PWD/.tools/node_modules/.bin:$PATH"
+bun test ./test/wallet-ledger-entry.test.ts
+DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering bun run check
+bun run test:infra
+bun run test:orm
+bun run test:migrations
+```
+
+| Comando/verificação | Resultado real |
+|---|---|
+| Suite isolado WalletLedgerEntry | 66 passaram, 0 falharam, 422 expectativas; sem conexão a serviços |
+| check | Typecheck aprovado; 163 testes passaram, 0 falharam, 626 expectativas; build aprovado |
+| test:infra | 2 PostgreSQL + 4 SQS passaram, incluindo restart/recriação |
+| test:orm | 2 passaram, integração real Nest/SQL e restrição de credencial |
+| test:migrations | 2 passaram, migrations/rollback reais em bancos descartáveis |
+| Exemplo compilado | Débito/crédito equilibrados, data preservada e divergência reidratada detectada |
+
+Total final: **173 casos distintos**, incluindo os **66 novos** e todos os **73 de
+Money**. A execução isolada repete casos e não é somada novamente. Testes existentes
+não foram modificados; Money e dependências/lockfile permaneceram iguais.
+
+O exemplo foi executado com `bun --eval` importando Money e WalletLedgerEntry de
+dist/domain. A saída observada foi:
+
+```text
+DEBIT 100.00 BRL 75.00 BRL true
+CREDIT 75.00 BRL 115.50 BRL true
+2026-10-22T12:00:00.000Z
+rehydrated mismatch: false
+```
+
+A data foi impressa depois de `debit.createdAt.setTime(0)`, mostrando que só a
+cópia foi alterada. A última linha consulta isBalanced no estado reidratado com
+after 74.99. Nenhuma dessas sondas grava lançamento financeiro no PostgreSQL.
+Diff revisado, links locais conferidos e hash do README oficial original preservado.
+Próxima etapa: Wallet Aggregate Root, somente após autorização; não implementada.

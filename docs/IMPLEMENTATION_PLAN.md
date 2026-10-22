@@ -13,13 +13,13 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após Money
+## Comparação com o README — atualização após WalletLedgerEntry
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
 | PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Schema financeiro e constraints futuros |
-| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Money implementado; demais pendentes | Invariantes entre entidades e schema |
+| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Money e WalletLedgerEntry implementados; Wallet/transações/persistência pendentes | Invariantes entre entidades e schema |
 | BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Pendente | Fluxos de negócio e reversões |
 | Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
@@ -41,7 +41,7 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 2 | `chore: configure PostgreSQL and LocalStack` | Concluída em dois commits: PostgreSQL persistente e SQS FIFO/DLQ, com testes reais de reinício/recriação |
 | 3 | `chore: configure MikroORM and reversible migrations` | Concluída em commits de integração Nest e migrations; demonstrações apenas em bancos descartáveis |
 | 4 | `feat: implement immutable Money value object` | Concluída: decimal.js, escala 2, BRL/USD/EUR, precisão por operação e 73 testes de Money |
-| 5 | `feat: implement immutable wallet ledger entries` | Factory, rehydrate e equação antes/depois; sem mutação |
+| 5 | `feat: implement immutable wallet ledger entries` | Concluída: create/rehydrate/isBalanced, estado imutável incluindo Date; 66 testes específicos |
 | 6 | `feat: implement Wallet aggregate` | Abertura/debit/credit, version, saldo e ledger inseparáveis; testes de invariantes |
 | 7 | `feat: implement wager transaction state machine` | Kinds, transições, estados terminais, failure codes; casos válidos e inválidos |
 | 8 | `feat: enforce financial database constraints` | Persistência/mapeamento e constraints, ledger imutável; tentar violar por SQL direto |
@@ -101,6 +101,11 @@ resultados matemáticos assinados são internos. Foram aprovadas precisão por o
 sem teto monetário nesta etapa e moedas BRL/USD/EUR (ADR-008). Antes dos contratos
 financeiros/schema, decidir limites de payload/NUMERIC, zero por operação e referências
 opcionais. Concluir Money não autoriza implementar a etapa seguinte automaticamente.
+
+Etapa 5 autorizada e concluída em 22/10/2026: WalletLedgerEntry reutiliza Money
+sem alterações; ADR-009 documenta create vs rehydrate, cópias defensivas de Date e
+constraints/índices futuros. Nenhuma migration financeira criada. Próxima etapa:
+Wallet Aggregate Root, dependente de nova autorização; não iniciada nesta entrega.
 
 Também foi aprovado usar LocalStack Community anterior sem token, fixado por
 versão/digest, após identificar a exigência de conta nas versões atuais. A ADR-005
