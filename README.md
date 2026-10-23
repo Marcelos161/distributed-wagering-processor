@@ -760,7 +760,10 @@ o lançamento em abertura positiva, débito e crédito. WagerTransaction modela 
 lifecycle, referências e códigos de falha localmente. O schema financeiro está
 versionado em três migrations, com constraints, ledger imutável e verificações
 diferíveis testadas por SQL em bancos descartáveis. Não foi aplicado no banco
-principal; mapeamento e casos de uso financeiros ainda não foram implementados. Para estudar
+principal. Mappers, repositórios e unidade transacional com lock por wallet estão
+implementados. Eventos v1, Inbox/Outbox e sua integração na mesma transação foram
+adicionados em uma quarta migration, também validada só em bancos descartáveis.
+Publishers, consumers e casos de uso financeiros públicos permanecem pendentes. Para estudar
 só Money: `bun test ./test/money.test.ts`; lançamentos:
 `bun test ./test/wallet-ledger-entry.test.ts`; Wallet: `bun test ./test/wallet.test.ts`;
 WagerTransaction: `bun test ./test/wager-transaction.test.ts`.
@@ -784,6 +787,8 @@ bun run test:infra
 bun run test:orm
 bun run test:migrations
 bun run test:financial
+bun run test:persistence
+bun run test:messaging
 ```
 
 Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute

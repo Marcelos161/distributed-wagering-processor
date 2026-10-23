@@ -765,3 +765,47 @@ nem exigência retroativa de evento em todas as transações antigas. Atomicidad
 fornecida pela unidade compartilhada **quando o chamador inclui os eventos**; validar
 a semântica dos fatos corresponde às factories/casos de uso, não a um JOIN genérico
 no CHECK JSONB. Isso preserva os contratos/migrations financeiros anteriores.
+
+## ADR-019 — Inbox/Outbox na unidade financeira
+
+As portas FinancialRepositories passam a incluir inbox/outbox; createRepositories
+constrói os cinco adaptadores sobre a **mesma FinancialSession/EntityManager**. Nenhuma
+transação paralela de mensagens, connection.execute sem contexto ou chamada SQS foi
+introduzida. HTTP pode omitir Inbox, mas inclui Outbox junto dos efeitos. Para SQS,
+ordem de aquisição: Inbox → wallets em ordem de ID → escritas financeiras → Outbox
+→ Inbox processada. Não adquirir Inbox depois de lock financeiro em outro fluxo.
+
+MikroInboxRepository.receive: INSERT ON CONFLICT DO NOTHING RETURNING; se não inseriu,
+SELECT FOR UPDATE em **comando separado** obtém snapshot READ COMMITTED posterior à
+espera pela unicidade. Compara hash antes de qualquer retorno de replay. Resultado
+new/pending permite trabalhar; processed instrui o futuro caso de uso a não repetir
+efeitos. Uma Inbox ainda pendente exige retomada sob lock, não é replay concluído.
+Alternativa de SELECT antes do INSERT teria race; capturar23505 dentro da transação
+sem savepoint a deixaria abortada. Não fazemos upsert que sobrescreva hash/receivedAt.
+
+Outbox INSERT mantém id=eventId único; colisão23505 é explícita, não sucesso silencioso.
+listDue é uma consulta limitada1..1000 e ordenada; não reivindica eventos nem permite
+salvar seus snapshots. findByIdForUpdate permite transição unitária sob lock; save só
+atualiza lifecycle. Um futuro publisher pode implementar lote SKIP LOCKED sobre o
+índice parcial, mas ainda precisa decidir duração de lock/lease, ordenação por wallet,
+política de falhas e envio fora da transação financeira. Só possuir lista não é claim.
+
+Mappers convertem datas/null e JSONB sem passar dinheiro por number. O envelope
+permanece profundamente imutável; rehydrate conserva identidade e agendamento sem
+repetir transições. Sessão usa ownership por token também para Inbox/Outbox: objetos
+mutados em rollback ou vindos de outra unidade não podem ser salvos/reinseridos; devem
+ser recarregados. Mapas não são deduplicação distribuída: UNIQUE e locks são a garantia.
+
+Evidência: transação de fixture confirma cinco tabelas com dois eventos; falhas antes
+ou durante commit deixam todas vazias. Nova instância ORM encontra Inbox processada,
+retorna replay sem segundo ledger. Duas sessões concorrentes esperam na mesma chave;
+hash igual retorna replay, diferente gera INBOX_PAYLOAD_CONFLICT. Outra carteira/
+mensagem confirma durante espera. EventId duplicado espera e falha23505. Cenários não
+substituem consumidores/publishers reais, testes de kill-process,50 redeliveries ou
+replay HTTP. Hash continua sendo entrada confiável do futuro adaptador de admissão.
+
+Referências: [PostgreSQL READ COMMITTED](https://www.postgresql.org/docs/17/transaction-iso.html)
+e [AWS Transactional Outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html).
+A Outbox evita perda entre commit e intenção de publicação, mas a publicação pode
+repetir depois de falha entre envio e registro published. Consumidores precisarão
+deduplicar eventId persistente; FIFO não substitui esse contrato.

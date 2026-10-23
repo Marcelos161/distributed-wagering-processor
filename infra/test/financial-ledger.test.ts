@@ -241,12 +241,12 @@ test('SET CONSTRAINTS IMMEDIATE exposes an incomplete financial write before com
 test('all financial migrations reverse and reapply without leftover schema or duplicated history', async () => {
   await withFinancialDatabase(migration, async ({ owner, orm, app }) => {
     await openFundedWallet(app);
-    expect(await orm.migrator.up()).toHaveLength(0);
+    expect(await orm.migrator.up({ to: migration })).toHaveLength(0);
     await orm.migrator.down({ to: 0 });
     expect(await owner`SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename`)
       .toEqual([{ tablename: 'mikro_orm_migrations' }]);
     expect((await owner`SELECT count(*)::text AS count FROM pg_proc WHERE pronamespace='public'::regnamespace`)[0].count).toBe('0');
-    await orm.migrator.up();
+    await orm.migrator.up({ to: migration });
     expect(await orm.migrator.getExecuted()).toHaveLength(3);
     await openFundedWallet(app);
   });

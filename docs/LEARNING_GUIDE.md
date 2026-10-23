@@ -3397,3 +3397,165 @@ parâmetro objeto nativo. O CHECK não foi relaxado. Todos usam PG real.
 Validação SQL da migration00004 após corrigir a fixture: 3 testes reais aprovados,
 35 assertions, incluindo down/up. Typecheck aprovado. A correção da fixture foi
 registrada separadamente; o commit inicial do schema precedeu essa correção.
+
+## 23. Mappers e repositórios de mensagens na mesma transação
+
+Um exemplo completo agora testado: recebemos message-wallet; Inbox registra hash;
+Wallet abre100.00; OPENING/ledger são inseridos; dois eventos v1 são enfileirados na
+Outbox; Inbox é marcada processada. O commit confirma tudo junto. Um erro no último
+CHECK financeiro desfaz **inclusive os eventos e processedAt**, mesmo que o callback
+já tenha terminado. Depois de rollback, não se dá ack e não se reutilizam objetos
+mutados. Na próxima tentativa, nova sessão consulta novamente o banco.
+
+MessageId identifica mensagem lógica do envelope consumido. Não é idempotencyKey da
+operação e não deve ser substituído automaticamente pelo ReceiptHandle do SQS, que
+muda em redelivery. A identidade/receipts de transporte serão tratados no consumidor.
+Uma operação financeira reenviada em **outro messageId** ainda requer a idempotência
+por provedor já desenhada para WagerTransaction; Inbox não substitui isso. payloadHash
+é fornecido pelo futuro adaptador confiável que calculará JSON canônico, não prova de
+integridade se aceito cegamente do remetente. Hash diferente na mesma chave é conflito.
+
+### Contratos e chamadas
+
+`src/application/ports/message-persistence.ts` define InboxRepository e OutboxRepository
+somente com tipos do domínio. FinancialRepositories ganhou essas duas propriedades;
+run(callback) mantém a mesma assinatura e semântica. As tabelas só são acessadas quando
+a operação usa os novos repositórios, portanto iniciar Nest não executa migrations.
+
+Arquivos abaixo em `src/infrastructure/persistence/financial`; métodos async retornam
+Promise e propagam erros de domínio, TypeError/RangeError, sessão expirada e SQLSTATE.
+SQL usa placeholders e parâmetros separados; não concatena valores de mensagens.
+
+| Método/função | Parâmetros → retorno resolvido; fluxo, chamadores e erros |
+|---|---|
+| message-mappers.ts/InboxMapper.toDomain | InboxRecord→InboxMessage; snake_case→camelCase, readTimestamp, null→undefined; rehydrate valida estrutura sem processar de novo. Usado por receive. |
+| InboxMapper.toRecord | InboxMessage→InboxRecord; extrai identidade/hash/cópias Date, undefined→null. Usado por receive e testes; nunca gera IDs. |
+| OutboxMapper.toDomain | OutboxRecord→OutboxMessage; mantém JSONB, id/tipo/agregado/attempts; converte datas; rehydrate não calcula retry nem publica. Validação de envelope recusa inconsistências de representação. |
+| OutboxMapper.toRecord | OutboxMessage→OutboxRecord; getters e payload imutável, null nas datas ausentes. Usado por insert/save. Contador é number int32, dinheiro permanece string dentro de JSONB. |
+| inbox-repository.ts/MikroInboxRepository.constructor | session:FinancialSession→instância; armazena sessão já transacional, não abre conexão. |
+| receive | ReceiveInboxProps→{message:InboxMessage,disposition:'new'\|'pending'\|'processed'}; valida via receive de domínio, INSERT com PK e DO NOTHING; se colidiu, SELECT FOR UPDATE em novo comando; exige linha, compara hash e lança InboxConflictError se divergir; mapeia/associa ownership e informa estado. Chamador deve sair sem efeitos em processed. |
+| save da Inbox | message:InboxMessage→void; exige objeto desta sessão e processedAt definido; UPDATE só processed_at WHERE chave/processed_at NULL RETURNING; zero linhas significa já processada. Chamado após efeitos e Outbox. |
+| outbox-repository.ts/MikroOutboxRepository.constructor | session:FinancialSession→instância; compartilha EM, sem transação independente. |
+| insert da Outbox | message:OutboxMessage→void; verifica ownership, mapeia e INSERT dos oito campos; JSON.stringify é passado ao driver MikroORM com cast jsonb explícito. Colisão eventId23505 propaga; não sobrescreve evento divergente. |
+| findByIdForUpdate | id:string→OutboxMessage\|null; SELECT FOR UPDATE na PK; reidrata e associa ownership, null se ausente. Permite atualizar lifecycle com lock até fim SQL. |
+| listDue | now:Date,limit:number→readonly OutboxMessage[]; exige data finita e limite inteiro1..1000; SELECT pendentes vencidos, ORDER BY vencimento/occurredAt/id, LIMIT; mapeia/congela array. Snapshots não recebem ownership para save. Consulta não reivindica publicação. |
+| save da Outbox | message:OutboxMessage→void; exige ownership; UPDATE attempts/next/published WHERE id e ainda pendente; exige RETURNING. Trigger protege sequência/estado terminal. Não envia SQS. |
+| createRepositories modificado | session→FinancialRepositories; constrói cinco adaptadores com a mesma sessão e congela envelope. Chamado pelo callback transactional existente. |
+| FinancialSession.attachMessage | InboxMessage\|OutboxMessage→void; assertActive, verifica token dono, recusa outra sessão, registra token. Usado em inserção/recebimento/leitura lockada. |
+| FinancialSession.assertMessage | InboxMessage\|OutboxMessage→void; exige sessão ativa e token igual; recusa snapshot sem lock, objeto escapado ou mutado em rollback. Usado em saves. |
+
+O INSERT da Inbox pode aguardar outra sessão por causa da PK. Se ela confirmar,
+DO NOTHING retorna sem linha; o **SELECT seguinte** vê o resultado confirmado. Usar
+CTE com um SELECT no mesmo snapshot pode não ver a linha que causou conflito. Se a
+primeira sessão fizer rollback, o INSERT concorrente poderá criar a linha e executar
+a operação. Esse protocolo usa estado do PostgreSQL, não cache/mutex em memória.
+
+A ordem comum dos locks deve ser Inbox (se houver), depois wallets em ordem crescente.
+Um futuro handler HTTP não toma lock de Inbox. O publisher deve tratar Outbox em fluxo
+separado e nunca adquirir wallet depois de segurar eventos para publicar. O índice
+parcial prepara seleção SKIP LOCKED; não implementamos o worker, seu lease nem envio.
+
+### O que acontece depois de um crash
+
+Se o processo morre **antes do commit**, PostgreSQL reverte a operação. Se morre após
+commit mas antes de publicar, a Outbox permanece pendente; outro publisher poderá
+selecioná-la depois. Se o envio foi aceito pelo SQS mas publishedAt não foi confirmado,
+a publicação poderá repetir com o **mesmo eventId**. At-least-once exige consumidor
+idempotente. Nenhuma transação SQL pode desfazer uma mensagem já enviada ao broker;
+por isso não fazemos publicação dentro do callback financeiro ou antes do commit.
+
+Após uma falha transitória do broker, o futuro publisher chamará scheduleRetry e
+persistirá a agenda em uma transação apropriada. Após erro permanente, precisará
+registrar/alertar a condição segundo política ainda não implementada. A mensagem não
+é descartada automaticamente pelo contador. Falha de negócio em aposta é outro caso:
+REJECTED + evento são confirmados e a entrada poderá receber ack. Pendência de referência
+não autoriza duplicar ledger: registra-se PENDING_REFERENCE e evento, para worker futuro.
+
+### Fixtures e testes: catálogo completo
+
+`infra/test/messaging-support.ts`:
+
+- `messageAt`: instante fixo com milissegundos; permite comparar identidade temporal.
+- `withMessagingDatabase(run:(FinancialDatabase & {appOrm,unit})=>Promise<void>):Promise<void>`:
+  cria banco descartável, aplica00004 e antecessoras como migrations, cria ORM **app**
+  separado e unidade, aguarda callback, fecha ORM em finally; helper externo apaga
+  só o banco de teste. Falhas de migração/SQL/assertions propagam.
+- `openingWithMessages(repos,id='wallet',hash='hash',withInbox=true):Promise<'applied'|'replay'>`:
+  recebe Inbox opcional, sai em processed; chama fixture persistOpening, recupera tx e
+  ledger; cria Processed/BalanceChanged com eventIds fixos por fixture; insere Outbox;
+  marca/salva Inbox. Não é caso de uso público e não é importado por src. HTTP simulado
+  usa withInbox=false; valores default só existem nos testes.
+
+`infra/test/messaging-transactions.test.ts`: callbacks async→Promise<void>; usam
+fixture/mappers/repositórios reais e falham em assertions/erros inesperados:
+
+| Nome | Passos/evidência |
+|---|---|
+| atomic opening persists outbox with broker inbox=true/false | run completo, consulta separada exige1wallet/1tx/1ledger/2eventos e1ou0Inbox; lista ordenada conserva amount100.00 e timestamp. |
+| failure at callback/commit rolls back financial rows inbox and outbox | lança erro após fixture ou insere wallet inválida sem ledger; verifica callback terminado no caso diferível; todas as cinco tabelas ficam vazias; nova tentativa é aplicada. |
+| persistent replay has no second financial effect and divergent hash conflicts | confirma fixture, fecha ORM, inicializa novo ORM app/unidade; mesma mensagem retorna replay, hash divergente retorna código específico; ledger1 e eventos2. Finalmente fecha ORM novo. |
+| pending inbox resumes and message objects cannot cross rollback boundary | confirma Inbox pendente, retoma sob lock, marca processada e força rollback; objeto JS continua processado, save em nova unidade é recusado, leitura persistida permite nova execução. |
+| outbox rehydrates retry and publication and rejects stale read-only snapshots | agenda retry sob lock e salva; nova unidade conserva attempts/next, listDue exclui futuro; recusa objeto anterior e snapshot de lista; publica em instante devido e confirma leitura de publishedAt. Limite inválido e ID ausente também testados. |
+| all four event types survive JSONB mapping with stable type and version | cria abertura, LOSS processada, BET rejeitada, REFUND pendente com suas tx/eventos; lê JSONB e exige quatro tipos, v1/IDs/datas/amount string; somente abertura tem ledger. |
+
+`infra/test/messaging-concurrency.test.ts`:
+
+- `gate():{ready:Promise<void>,open:()=>void}` cria barreira explícita; o executor
+  Promise captura resolve como open. Segura commit da sessão A, não simula lock SQL.
+- `bounded<T>(operation:Promise<T>):Promise<T>` corre contra watchdog5s, retorna
+  resultado ou erro de timeout e limpa timer em finally; não é evidência de lock.
+- `observeWait(sql:SQL,table:string):Promise<void>` consulta pg_stat_activity filtrando
+  banco/espera Lock/tabela e pg_blocking_pids não vazio; confere PID distinto; polling10ms
+  até4s. A espera é comprovada pelo servidor, não inferida por atraso.
+- Dois casos `concurrent Inbox waits then checks payload hash/different`: A persiste
+  fixture e segura commit; B tenta mesma chave; observador confirma espera; outra
+  mensagem/wallet confirma durante bloqueio; A libera; B retorna replay ou conflito,
+  com apenas1ledger/2eventos para wallet original.
+- `concurrent Outbox inserts wait and reject duplicate event identity`: A grava evento
+  e segura commit; B reidrata cópia independente e tenta mesmo eventId; observa espera;
+  libera A; B falha23505; uma linha permanece. Não é teste de publisher concorrente.
+- Callbacks then capturam erros como resultados para evitar rejeições não tratadas;
+  finally libera barreiras e aguarda allSettled antes de remover banco. Resultado
+  errado/deadlock/timeout faz o teste falhar; não aceitamos erro como prova de sucesso.
+
+Cobertura complementar em `test/message-models.test.ts`: teste `invalid lifecycle times
+and attempt overflow leave snapshots unchanged` verifica data prematura/inválida,
+limite int32 e Inbox com processed anterior; estado não se altera quando a transição
+falha. Callback void, helper event já documentado na seção21.
+
+Regressão ajustada em `infra/test/financial-ledger.test.ts`: o teste de down/up das
+**três migrations financeiras** agora passa `{to:migration}` ao Migrator, preservando
+a mesma exigência de3 registros e limpeza total. Antes `up()` passou a aplicar também
+a quarta migration e invalidou a premissa do teste. A nova migration tem teste próprio
+de up/down/reaplicação; não removemos assertions nem alteramos constraints antigas.
+
+### Evidência final desta etapa — 23/10/2026
+
+| Comando executado | Resultado real |
+|---|---|
+| `bun run check` com DATABASE_URL local | typecheck OK;437 testes aprovados;build OK |
+| `bun run test:messaging` | 14 aprovados:3schema,8atomicidade/mapeamento/lifecycle,3concorrência |
+| `bun run test:persistence` | 15 aprovados |
+| `bun run test:financial` | 34 aprovados |
+| `bun run test:orm` | 2 aprovados |
+| `bun run test:migrations` | 2 aprovados |
+| `bun run test:infra` | 2PostgreSQL+4SQS aprovados |
+
+Total510 testes distintos (27 novos sobre483); não somamos repetição de suites. As
+consultas finais de pg_tables em wagering/public e pg_database para dwp_test_* retornaram
+zero linhas. Nenhuma migration foi aplicada ao principal. Os testes SQS são regressões
+da infraestrutura anterior, não validação de um publisher/consumer novo.
+
+Problemas encontrados: fixture Bun precisava de JSON nativo; teste antigo de migrations
+precisou explicitar até00003; tentativa de usar disconnect no ORM foi recusada pelo
+typecheck e o teste foi implementado fechando/recriando a instância oficial. Cada falha
+foi corrigida e o cenário correspondente executado com sucesso. Não houve relaxamento
+de constraints para resolver falhas.
+
+Garantias demonstradas: eventos tipados/imutáveis; mensagens persistidas com unicidade
+por consumidor/evento; hash conflitante explícito; rollback integral das cinco tabelas;
+replay persistente na fixture; ausência de bloqueio global nos cenários observados.
+Continuam pendentes: cálculo canônico de hash na admissão, casos de uso públicos,
+replay HTTP, publishers/consumers, lease/claim concorrente de publicação, ack e DLQ
+operacionais, kill-process e reprocessamento de referências. Não afirmamos que chamar
+save de Wallet sozinho passa a produzir eventos automaticamente.

@@ -200,3 +200,16 @@ Persistência entre instâncias ainda depende das tabelas/repositórios seguinte
 Terceiro incremento: migration00004 Inbox/Outbox, unicidade, validação JSONB, índice de
 pendentes, lifecycle e permissões. Up/down/reaplicação testados em banco descartável;
 principal preservado. Repositórios/unidade compartilhada serão validados a seguir.
+
+Quarto incremento: Inbox/Outbox adicionadas às portas e à mesma FinancialSession.
+Receive com UNIQUE/lock compara hash, distingue new/pending/processed; Outbox tem INSERT,
+consulta pendente limitada/ordenada e update de lifecycle sob lock. Atomicidade das
+cinco tabelas, replay após recriar ORM e disputas concorrentes testadas em PostgreSQL.
+Nenhum publisher/consumer foi iniciado; listDue não é claim nem publicação.
+
+Etapa eventos/Inbox/Outbox concluída:510 testes distintos aprovados, typecheck/build
+OK, banco principal sem migrations e bancos descartáveis removidos. Próxima etapa
+recomendada: caso de uso transacional de abertura de carteira (incluindo OPENING,
+ledger e dois eventos Outbox), após autorização; depois admissão/processamento e
+idempotência compartilhados por HTTP/SQS. Publishers/consumers operacionais exigem
+suas próprias etapas e decisões, e não foram iniciados automaticamente.

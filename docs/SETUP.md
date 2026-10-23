@@ -289,3 +289,18 @@ de produção. Os repositórios só funcionam dentro da unidade injetada por
 `FINANCIAL_UNIT_OF_WORK`. Um futuro serviço deve chamar `unit.run(async repos => ...)`
 e aguardar cada operação; não guardar repos/Wallet para reutilizar na próxima execução.
 A aplicação continua sem migrations financeiras no banco principal nesta entrega.
+
+### Eventos e persistência de Inbox/Outbox
+
+```bash
+bun test ./test/integration-events.test.ts ./test/message-models.test.ts
+bun run test:messaging
+```
+
+`test:messaging` executa schema, atomicidade/replay e concorrência em bancos descartáveis,
+aplicando as quatro migrations nesses bancos. O banco principal não precisa recebê-las.
+A aplicação financeira passará a usar `unit.run(async repos => ...)`, com `repos.inbox`
+e `repos.outbox` além dos três repositórios anteriores. Todos compartilham a transação.
+`outbox.listDue(now,limit)` é consulta, não publisher; não envia SQS nem faz claim.
+Os testes concorrentes observam locks reais, portanto precisam do PostgreSQL saudável.
+`test:infra` continua reiniciando serviços; não execute junto de testes financeiros.

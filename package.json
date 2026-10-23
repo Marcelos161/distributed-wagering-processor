@@ -29,7 +29,8 @@
     "migration:list": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:list --config mikro-orm.config.ts",
     "check": "bun run typecheck && bun run test && bun run build",
     "test:financial": "bun test ./infra/test/financial-wallet.test.ts ./infra/test/financial-wager.test.ts ./infra/test/financial-ledger.test.ts",
-    "test:persistence": "bun test ./infra/test/persistence-*.test.ts"
+    "test:persistence": "bun test ./infra/test/persistence-*.test.ts",
+    "test:messaging": "bun test ./infra/test/messaging-*.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

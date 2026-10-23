@@ -51,3 +51,15 @@ test('rehydration preserves schedule without increment and rejects inconsistent 
   expect(() => OutboxMessage.rehydrate({ ...state, payload: { ...state.payload, version: 2 } })).toThrow();
   expect(() => OutboxMessage.rehydrate({ ...state, nextAttemptAt: undefined })).toThrow();
 });
+
+test('invalid lifecycle times and attempt overflow leave snapshots unchanged', () => {
+  const message=OutboxMessage.enqueue(event());
+  expect(() => message.markPublished(new Date(0))).toThrow();
+  expect(() => message.scheduleRetry(new Date(NaN))).toThrow();
+  expect(message.attempts).toBe(0); expect(message.isPending()).toBe(true);
+  const maximum=OutboxMessage.rehydrate({id:message.id,aggregateId:message.aggregateId,eventType:message.eventType,
+    payload:message.payload,occurredAt:at,attempts:2147483647,nextAttemptAt:at});
+  expect(() => maximum.scheduleRetry(at)).toThrow();
+  expect(maximum.attempts).toBe(2147483647);
+  expect(() => InboxMessage.rehydrate({messageId:'m',consumerName:'c',payloadHash:'h',receivedAt:at,processedAt:new Date(0)})).toThrow();
+});

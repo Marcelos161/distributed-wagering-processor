@@ -1,8 +1,11 @@
+import type { InboxMessage } from '../../../domain/messaging/inbox-message.js';
+import type { OutboxMessage } from '../../../domain/messaging/outbox-message.js';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import type { Wallet } from '../../../domain/wallet/wallet.js';
 import type { WagerTransaction } from '../../../domain/wagering/wager-transaction.js';
 
 // Object ownership only: never a distributed lock or an idempotency guarantee.
+const messageOwners = new WeakMap<InboxMessage | OutboxMessage, symbol>();
 const walletOwners = new WeakMap<Wallet, symbol>();
 const transactionOwners = new WeakMap<WagerTransaction, symbol>();
 
@@ -18,6 +21,18 @@ export class FinancialSession {
 
   assertActive(): void {
     if (!this.#active || !this.em.isInTransaction()) throw new Error('Financial session is closed or outside a transaction');
+  }
+
+  attachMessage(message: InboxMessage | OutboxMessage): void {
+    this.assertActive();
+    const owner = messageOwners.get(message);
+    if (owner && owner !== this.#identity) throw new Error('Reload message in the current transaction');
+    messageOwners.set(message, this.#identity);
+  }
+
+  assertMessage(message: InboxMessage | OutboxMessage): void {
+    this.assertActive();
+    if (messageOwners.get(message) !== this.#identity) throw new Error('Load message with a lock in the current transaction');
   }
 
   close(): void { this.#active = false; }
