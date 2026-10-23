@@ -309,3 +309,10 @@ zero tabelas públicas e nenhum banco descartável remanescente. Enunciado prese
 nenhum push. Próxima etapa sugerida: ROLLBACK, só após autorização e definição das
 sequências permitidas com REFUND; a unicidade por tipo não oferece exclusão cruzada.
 HTTP, consumer, publisher, worker de referências e autenticação continuam pendentes.
+
+
+Missão final autorizada em 23/10/2026: avançar por todas as fases restantes, com
+commits e validações por fase. A auditoria operacional está em DELIVERY_CHECKLIST.md.
+Fase1 integra ROLLBACK e proteção cruzada persistente; não requer novo prompt para
+prosseguir ao worker, API, consumer/publisher e validação final. Esta autorização
+substitui as pausas históricas descritas acima, sem autorizar destruição do principal.

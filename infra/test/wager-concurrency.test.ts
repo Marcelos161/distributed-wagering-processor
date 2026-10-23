@@ -102,6 +102,7 @@ test('crossed WIN references on two wallets do not add a circular lock dependenc
     const orm = await MikroORM.init(createOrmOptions(applicationUrl)), bothInserted = gate();
     let arrived = 0;
     const pauseAfterInsert = (base: FinancialUnitOfWork): FinancialUnitOfWork => ({ run: work => base.run(repos => work({ ...repos, transactions: {
+      findProcessedReversal: id => repos.transactions.findProcessedReversal(id),
       findProcessedRefund: id => repos.transactions.findProcessedRefund(id),
       findById: id => repos.transactions.findById(id), findByExternalId: (p, e) => repos.transactions.findByExternalId(p, e),
       findByIdempotencyKey: (p, k) => repos.transactions.findByIdempotencyKey(p, k), updateLifecycle: tx => repos.transactions.updateLifecycle(tx),

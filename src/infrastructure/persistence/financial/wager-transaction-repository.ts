@@ -6,6 +6,10 @@ import { WagerTransactionMapper, type WagerTransactionRecord } from './wager-tra
 export class MikroWagerTransactionRepository implements WagerTransactionRepository {
   constructor(private readonly session: FinancialSession) {}
 
+  async findProcessedReversal(referenceId: string): Promise<WagerTransaction | null> {
+    return this.read("SELECT * FROM wager_transactions WHERE reference_transaction_id=? AND kind IN ('REFUND','ROLLBACK') AND status='PROCESSED'", [referenceId]);
+  }
+
   async findProcessedRefund(referenceId: string): Promise<WagerTransaction | null> {
     return this.read("SELECT * FROM wager_transactions WHERE reference_transaction_id=? AND kind='REFUND' AND status='PROCESSED'", [referenceId]);
   }

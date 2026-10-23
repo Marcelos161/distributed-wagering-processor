@@ -9,6 +9,7 @@ import { FailureCode } from '../../domain/wagering/failure-code.js';
 import { WalletError } from '../../domain/wallet/wallet-error.js';
 import type { Wallet, WalletMovementResult } from '../../domain/wallet/wallet.js';
 import { WagerTransactionProcessed, WagerTransactionRejected, WagerTransactionPendingReference, WalletBalanceChanged } from '../../domain/messaging/financial-events.js';
+import { LedgerDirection } from '../../domain/wallet/wallet-ledger-entry.js';
 import { Money } from '../../domain/money/money.js';
 import { WagerTransactionError } from '../../domain/wagering/wager-transaction-error.js';
 import { OutboxMessage } from '../../domain/messaging/outbox-message.js';
@@ -64,8 +65,8 @@ export class ProcessWagerTransaction {
     // Do not acquire reference identity/wallet locks here: that would invert admission order.
     const reference = input.referenceExternalTransactionId === undefined ? undefined
       : (await repos.transactions.findByExternalId(input.providerId, input.referenceExternalTransactionId)) ?? undefined;
-    const previousRefund = tx.kind === WagerTransactionKind.Refund && reference
-      ? await repos.transactions.findProcessedRefund(reference.id) : null;
+    const previousRefund = tx.requiresReference() && reference
+      ? await repos.transactions.findProcessedReversal(reference.id) : null;
     const movement = this.apply(tx, wallet, reference, at, previousRefund);
     if (movement) await repos.wallets.save(wallet);
     await repos.transactions.updateLifecycle(tx);
@@ -96,10 +97,10 @@ export class ProcessWagerTransaction {
 
   /** Mutates only fresh domain objects. Persistence and event selection stay in the shared path. */
   private apply(tx: WagerTransaction, wallet: Wallet, reference: WagerTransaction | undefined, at: Date, previousRefund: WagerTransaction | null): WalletMovementResult | undefined {
-    if (tx.kind === WagerTransactionKind.Win || tx.kind === WagerTransactionKind.Refund) {
+    if (tx.kind === WagerTransactionKind.Win || tx.requiresReference()) {
       // Reuse domain reference validation before any credit.
       try {
-        if (tx.kind === WagerTransactionKind.Refund) tx.assertRefundAvailable(reference, previousRefund);
+        if (tx.requiresReference()) tx.assertReversalAvailable(reference, previousRefund);
         else tx.ledgerDirectionFor(reference);
       } catch (error) {
         if (!(error instanceof WagerTransactionError)) throw error;
@@ -110,7 +111,7 @@ export class ProcessWagerTransaction {
         return undefined;
       }
       const limit = Money.from({ amount: '999999999999999999.99', currency: wallet.currency });
-      if (limit.isLessThan(wallet.balance.add(tx.money))) {
+      if (tx.ledgerDirectionFor(reference) === LedgerDirection.Credit && limit.isLessThan(wallet.balance.add(tx.money))) {
         tx.reject(FailureCode.DomainRuleViolation);
         return undefined;
       }
@@ -118,10 +119,10 @@ export class ProcessWagerTransaction {
     let movement: WalletMovementResult | undefined;
     if (tx.kind !== WagerTransactionKind.Loss) {
       const props = { money: tx.money, transactionId: tx.id, ledgerEntryId: this.ids.next(), at };
-      try { movement = tx.kind === WagerTransactionKind.Bet ? wallet.debit(props) : wallet.credit(props); }
+      try { movement = tx.ledgerDirectionFor(reference) === LedgerDirection.Debit ? wallet.debit(props) : wallet.credit(props); }
       catch (error) {
         if (!(error instanceof WalletError) || error.code !== 'INSUFFICIENT_FUNDS') throw error;
-        tx.reject(FailureCode.InsufficientFunds);
+        tx.reject(tx.kind === WagerTransactionKind.Rollback ? FailureCode.ReversalInsufficientFunds : FailureCode.InsufficientFunds);
         return undefined;
       }
     }

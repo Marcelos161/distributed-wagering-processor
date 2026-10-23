@@ -192,13 +192,20 @@ export class WagerTransaction {
   assertRefundAvailable(reference: WagerTransaction | undefined, previousRefund: WagerTransaction | null): void {
     this.#assertMutable();
     if (this.kind !== WagerTransactionKind.Refund) throw new WagerTransactionError('INVALID_KIND', 'Availability check requires REFUND');
+    this.assertReversalAvailable(reference, previousRefund);
+  }
+
+  /** One successful compensation per reference, including cross-kind BET reversals. */
+  assertReversalAvailable(reference: WagerTransaction | undefined, previous: WagerTransaction | null): void {
+    this.#assertMutable();
+    if (!this.requiresReference()) throw new WagerTransactionError('INVALID_KIND', 'Availability requires a reversal');
     this.#assertReference(reference);
-    if (previousRefund === null) return;
-    if (!(previousRefund instanceof WagerTransaction) || previousRefund.kind !== WagerTransactionKind.Refund
-      || previousRefund.status !== WagerTransactionStatus.Processed || previousRefund.referenceTransactionId !== reference!.id) {
-      throw new TypeError('Expected a processed REFUND of the resolved reference');
+    if (previous === null) return;
+    if (!(previous instanceof WagerTransaction) || !previous.requiresReference()
+      || previous.status !== WagerTransactionStatus.Processed || previous.referenceTransactionId !== reference!.id) {
+      throw new TypeError('Expected a processed compensation of the resolved reference');
     }
-    throw new WagerTransactionError('DUPLICATE_REVERSAL', 'This BET already has a processed REFUND');
+    throw new WagerTransactionError('DUPLICATE_REVERSAL', 'Reference already has a successful compensation');
   }
 
   #assertMutable(): void {

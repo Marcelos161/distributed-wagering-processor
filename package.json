@@ -34,7 +34,8 @@
     "test:wallet-creation": "bun test ./infra/test/wallet-creation-*.test.ts",
     "test:bet": "bun test ./infra/test/bet-*.test.ts",
     "test:wager": "bun test ./infra/test/wager-*.test.ts",
-    "test:refund": "bun test ./infra/test/refund-*.test.ts"
+    "test:refund": "bun test ./infra/test/refund-*.test.ts",
+    "test:rollback": "bun test ./infra/test/rollback.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

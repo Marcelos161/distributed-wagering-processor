@@ -9,7 +9,7 @@ export interface WagerInput {
   readonly walletId: string;
   readonly roundId: string;
   readonly gameId: string;
-  readonly kind: 'BET' | 'WIN' | 'LOSS' | 'REFUND';
+  readonly kind: 'BET' | 'WIN' | 'LOSS' | 'REFUND' | 'ROLLBACK';
   readonly referenceExternalTransactionId?: string;
   readonly money: Readonly<MoneyProps>;
 }
@@ -31,18 +31,18 @@ export function prepareWager(input: WagerInput): PreparedWager {
     assertToken(input[field], field);
   }
   if (input.providerId === 'internal:wallet-opening') throw new InvalidWagerInputError('Provider namespace is reserved for internal openings');
-  if (!['BET', 'WIN', 'LOSS', 'REFUND'].includes(input.kind)) throw new InvalidWagerInputError('Only BET, WIN, LOSS and REFUND are supported');
+  if (!['BET', 'WIN', 'LOSS', 'REFUND', 'ROLLBACK'].includes(input.kind)) throw new InvalidWagerInputError('Only BET, WIN, LOSS, REFUND and ROLLBACK are supported');
   const reference = input.referenceExternalTransactionId;
-  if (input.kind === 'REFUND' && reference === undefined) throw new InvalidWagerInputError('REFUND requires an external reference');
+  if (['REFUND', 'ROLLBACK'].includes(input.kind) && reference === undefined) throw new InvalidWagerInputError('Reversal requires an external reference');
   if (reference !== undefined) {
     assertToken(reference, 'referenceExternalTransactionId');
-    if (!['WIN', 'REFUND'].includes(input.kind) || reference === input.externalTransactionId) {
-      throw new InvalidWagerInputError('Only WIN and REFUND may reference another external transaction');
+    if (!['WIN', 'REFUND', 'ROLLBACK'].includes(input.kind) || reference === input.externalTransactionId) {
+      throw new InvalidWagerInputError('Only WIN, REFUND and ROLLBACK may reference another external transaction');
     }
   }
   const money = Money.from(input.money);
   if (input.kind === 'LOSS' ? !money.isZero() : !money.isPositive()) {
-    throw new InvalidWagerInputError('LOSS requires zero; BET, WIN and REFUND require positive amounts');
+    throw new InvalidWagerInputError('LOSS requires zero; BET, WIN, REFUND and ROLLBACK require positive amounts');
   }
   if (Money.from({ amount: '999999999999999999.99', currency: money.currency }).isLessThan(money)) {
     throw new InvalidWagerInputError('Wager amount exceeds the financial storage limit');

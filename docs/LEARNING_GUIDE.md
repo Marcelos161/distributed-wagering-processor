@@ -5215,3 +5215,52 @@ A próxima etapa sugerida é ROLLBACK, somente após autorização e decisão ex
 sua interação com REFUND. O índice por referência/tipo não impede ambos sobre a mesma
 BET. Não foram implementados ROLLBACK, HTTP, consumer, publisher, worker de referências
 ou autenticação. Etapa REFUND encerrada com commits locais; nenhum push.
+
+## 38. ROLLBACK e proteção cruzada de compensações
+
+`prepareWager` agora admite ROLLBACK positivo, integral e com referência obrigatória.
+`WagerTransaction.assertReversalAvailable(reference,previous):void` valida mutabilidade,
+kind de reversão, referência pelo método de domínio existente e evidência persistida
+anterior. Retorna void se disponível; lança INVALID_KIND, erros de referência,
+DUPLICATE_REVERSAL ou TypeError para evidência malformada. Chamador: apply do processador.
+`assertRefundAvailable` preserva a API anterior e delega após verificar kind REFUND.
+
+`MikroWagerTransactionRepository.findProcessedReversal(referenceId:string)` retorna
+Promise<WagerTransaction|null> com SELECT parametrizado por ID interno e kinds
+REFUND/ROLLBACK PROCESSED. Usa sessão/mapper existentes; erros SQL propagam. A aplicação
+chama após lock da Wallet; não é prova isolada de ausência de corridas.
+
+`ProcessWagerTransaction.apply` usa ledgerDirectionFor para escolher debit/credit:
+ROLLBACK(BET) credita, ROLLBACK(WIN/REFUND) debita. Verifica teto somente no crédito;
+WalletError de falta de fundos vira REVERSAL_INSUFFICIENT_FUNDS para ROLLBACK. Caminhos
+de pendência, rejeição, eventos e snapshot são compartilhados. `process` consulta
+findProcessedReversal para os dois kinds. `WagerResultMapper.read` aceita o novo código
+já existente no domínio/schema. Não há mudança em Money nem conversão monetária numérica.
+
+Migration20261023000008.up/down são chamadas pelo migrator, sem parâmetros, retornam
+Promise<void>. Up adiciona índice parcial único e amplia check_wager_pending_receipt,
+check_wager_result e require_bet_result para ROLLBACK (mesmos contratos da seção35).
+Down recusa55000 com resultados novos e restaura SQL anterior; duplicidade histórica
+faz up falhar23505 sem apagar dados. DDL é transacional. Alternativas e sequências
+financeiras constam da ADR-027. Exemplo:100 → BET25 →75 → REFUND25 →100; ROLLBACK(BET)
+é rejeitado. ROLLBACK(REFUND) pode debitar25; isso não reabre a compensação da BET.
+
+`infra/test/operational-support.ts::withOperationalDatabase(run)` recebe callback
+(db:BetDatabase)=>Promise<void>, cria banco descartável, aplica migrations e ORM app,
+executa callback e fecha recursos em finally. Retorna Promise<void>, propaga erros.
+`infra/test/rollback.test.ts`: callbacks Bun test.each recebem kind/cenário e exercitam
+os três alvos, insuficiência em dois débitos, sete sequências da política, referência
+pendente/inválida/parcial e overflow. Testes sem parâmetros verificam migration
+up/down/reaplicação, recusa de downgrade, rollback em falha real de ledger e disputa
+REFUND/ROLLBACK em dois processos Bun independentes. Todos retornam Promise<void> e
+reconciliam saldo/ledger. Fixtures existentes não foram substituídas por mocks.
+O callback blocker segura Wallet até observar dois application_names esperando Lock
+no PostgreSQL; filhos usam bet-worker.ts real, stdio é drenado e PIDs distintos são
+verificados. Finally libera barreira/encerra filhos. Trigger fail_rollback() lança
+P0001 no INSERT de ledger para provar rollback de todas as tabelas. Apenas no descartável.
+
+Evidência fase1: `bun run check` aprovou494testes, typecheck e build; rollback14,
+refund57, bet40 e wager62 aprovaram em PostgreSQL real. Total executado neste incremento:
+667testes distintos, zero falhas. Dois testes inicialmente reutilizaram a key da BET
+na fixture WIN; corrigida a identidade da fixture, mantendo a detecção de conflito.
+`bun run test:rollback` reproduz os14cenários novos.

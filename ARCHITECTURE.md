@@ -1077,3 +1077,35 @@ Fechamento: 57 testes PostgreSQL REFUND e 16 unitários novos; 751 testes distin
 conjunto, zero falhas, typecheck/build aprovados. PostgreSQL/SQS também passaram suas
 suítes reais de restart/recriação. Principal sem tabelas financeiras e descartáveis
 removidos. ROLLBACK e serviços de transporte/reprocessamento continuam pendentes.
+
+## ADR-027 — Missão final e compensação única conservadora
+
+A missão final autoriza completar as etapas restantes sem novas aprovações rotineiras.
+A regra adicional escolhida é uma compensação bem-sucedida por referência, somando
+REFUND e ROLLBACK. Mantemos o índice oficial por referência/tipo e adicionamos um
+índice parcial por referência para status PROCESSED e kinds de reversão. Como REFUND
+só referencia BET, a nova restrição relevante é a exclusão cruzada nessa BET.
+
+| Sequência | Decisão |
+|---|---|
+| BET → REFUND | Crédito permitido |
+| BET → ROLLBACK(BET) | Crédito permitido |
+| BET → REFUND → ROLLBACK(BET) | Último rejeitado DUPLICATE_REVERSAL |
+| BET → ROLLBACK(BET) → REFUND | Último rejeitado DUPLICATE_REVERSAL |
+| BET → REFUND → ROLLBACK(REFUND) | Débito permitido se houver saldo |
+| BET → REFUND → ROLLBACK(REFUND) → ROLLBACK(BET) | Último rejeitado, reserva original não reabre |
+| WIN → ROLLBACK(WIN) | Débito permitido se houver saldo |
+
+Alternativa de compensação líquida permitiria reabrir a BET após desfazer REFUND,
+mas exigiria regras adicionais sobre cadeias/rodadas. Escolha conservadora solicitada:
+não inferir essa autorização financeira. Um pedido rejeitado não ocupa o índice.
+ROLLBACK sem fundos usa REVERSAL_INSUFFICIENT_FUNDS; créditos acima do teto usam
+DOMAIN_RULE_VIOLATION. Domínio decide elegibilidade, coordenador mantém locks de
+identidades → Wallet → leitura da referência/compensação. O banco protege SQL direto.
+
+Migration00008 amplia os resultados/receipts para ROLLBACK e adiciona o índice, sem
+reescrever dados. Se histórico antigo já contiver compensações cruzadas, o upgrade
+falha atomicamente para revisão explícita; nunca corrige saldo silenciosamente. Down
+recusa respostas ROLLBACK existentes. Sem elas restaura funções00007 e remove o novo
+índice. A aplicação de produção depende sempre de revisão/backup; nossos testes são
+somente em bancos descartáveis. A política não altera os bytes canônicos antigos.
