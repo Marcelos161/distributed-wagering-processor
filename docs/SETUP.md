@@ -87,7 +87,7 @@ para containers; não é necessário para a execução local atual.
   a um crash por regra financeira. Ainda não há worker SQS para drenar.
 
 Os resultados efetivamente observados estão no [guia de aprendizado](LEARNING_GUIDE.md).
-Migrations já possuem testes isolados; schema financeiro e testes distribuídos
+Migrations e schema financeiro já possuem testes isolados; testes distribuídos
 pertencem às próximas etapas. Money pode ser estudado/testado isoladamente pelo
 comando acima; exemplos e cada método estão na seção 12 do guia.
 
@@ -258,3 +258,11 @@ ainda não existem entidades mapeadas; SQL é escrito e revisado explicitamente.
 constraints/permissões por SQL direto. Não aplica nem reverte schema em wagering.
 Migrations versionadas podem ser consultadas pela CLI existente; aplicar no banco
 principal é uma ação separada. DOWN descarta dados das tabelas removidas.
+
+O comando financeiro agora executa 34 casos: 6 de Wallet, 8 de WagerTransaction e
+20 de Ledger/integração. As suítes de Wallet/Transaction também validam seus incrementos
+isolados; a suíte de Ledger aplica as três migrations e valida o conjunto final.
+O schema novo não é criado no startup do Nest. As entidades ORM financeiras ainda
+não estão registradas; `entities: []` não deve alimentar sincronização automática.
+Antes da aplicação em qualquer banco com dados, revisar as três migrations e a guarda
+de histórico; testes usam exclusivamente bancos dwp_test criados/removidos pelo helper.

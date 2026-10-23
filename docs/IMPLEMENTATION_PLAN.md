@@ -13,14 +13,14 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após WagerTransaction
+## Comparação com o README — atualização após schema financeiro
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
-| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Schema financeiro e constraints futuros |
-| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Money, WalletLedgerEntry, Wallet e WagerTransaction implementados localmente; persistência pendente | Atomicidade persistente e schema |
-| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Kinds, lifecycle, referências e direções locais implementados | Processamento atômico e reversões únicas no banco |
+| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Mapeamento financeiro e casos de uso futuros |
+| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Domínio implementado; schema financeiro versionado e testado em bancos descartáveis | Casos de uso, mapeamento e atomicidade com Inbox/Outbox |
+| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Kinds, lifecycle, referências e direções locais implementados | Casos de uso e processamento com Inbox/Outbox |
 | Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
 | Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Pendente | Crash após commit antes de ACK |
@@ -44,7 +44,7 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 5 | `feat: implement immutable wallet ledger entries` | Concluída: create/rehydrate/isBalanced, estado imutável incluindo Date; 66 testes específicos |
 | 6 | `feat: implement Wallet aggregate with balance invariants` | Concluída: abertura com ledger, debit/credit, versão/datas e rejeições sem efeitos; 81 testes específicos |
 | 7 | `feat: implement wager transaction lifecycle and domain rules` | Concluída: factories, estados terminais, referências, direções e códigos; 151 testes específicos |
-| 8 | `feat: enforce financial database constraints` | Persistência/mapeamento e constraints, ledger imutável; tentar violar por SQL direto |
+| 8 | `feat: enforce financial database constraints` | Concluída em 3 commits: migrations Wallet/Transaction/Ledger, constraints, permissões e integridade diferível; 34 testes SQL. Mapeamento/repositórios financeiros ficam para próxima autorização |
 | 9 | `feat: define versioned integration events` | Classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
 | 10 | `feat: persist transactional outbox records` | Modelo/repositório de Outbox e gravação dentro da mesma transação SQL; sem publicação ainda |
 | 11 | `feat: open and query wallets atomically` | Abertura + OPENING/ledger para saldo positivo, version=1, consultas e porta de identidade |
@@ -146,3 +146,13 @@ Segundo incremento da etapa 8: schema de transações, unicidade por provedor,
 referências pendentes/processadas, índices parciais e imutabilidade de input/terminais.
 Validações locais SQL e disputa concorrente do índice testadas; integração com saldo
 materializado e ledger será adicionada no terceiro incremento.
+
+
+Etapa 8 concluída em três incrementos: 34 testes reais do schema financeiro, incluindo
+correspondência de saldo/ledger/resultado, rollback, reversões únicas e duas conexões
+concorrentes. Migrations testadas apenas em bancos descartáveis; principal intocado.
+Ajuste de escopo explícito: EntitySchemas/mappers/repositórios não foram antecipados;
+o teste de driver confirma dinheiro string, e o desenho de mapeamento está na ADR-012.
+Próxima etapa recomendada, após autorização: mapeamento/repositórios financeiros e
+unidade transacional com lock por wallet. Eventos e Outbox continuam necessários
+antes de expor processamento com publicação; não saltar suas dependências no plano.

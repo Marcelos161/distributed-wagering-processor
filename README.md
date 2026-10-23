@@ -747,7 +747,7 @@ Teste de carga também conta como diferencial. Se fizer, exponha como `bun run t
 
 ---
 
-## Implementação do candidato — etapas 1 a 7
+## Implementação do candidato — etapas 1 a 8
 
 O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
 `GET /health/live`, PostgreSQL persistente e SQS FIFO/DLQ em LocalStack Community
@@ -757,8 +757,10 @@ usa decimal.js e aceita contratos com escala 2 em BRL/USD/EUR; tem testes unitá
 independentes de infraestrutura. WalletLedgerEntry modela lançamentos imutáveis,
 com criação validada e reidratação. Wallet controla saldo/versão localmente e retorna
 o lançamento em abertura positiva, débito e crédito. WagerTransaction modela kinds,
-lifecycle, referências e códigos de falha localmente. Ledger persistido, processamento
-e schema financeiro permanecem pendentes. Para estudar
+lifecycle, referências e códigos de falha localmente. O schema financeiro está
+versionado em três migrations, com constraints, ledger imutável e verificações
+diferíveis testadas por SQL em bancos descartáveis. Não foi aplicado no banco
+principal; mapeamento e casos de uso financeiros ainda não foram implementados. Para estudar
 só Money: `bun test ./test/money.test.ts`; lançamentos:
 `bun test ./test/wallet-ledger-entry.test.ts`; Wallet: `bun test ./test/wallet.test.ts`;
 WagerTransaction: `bun test ./test/wager-transaction.test.ts`.
@@ -781,6 +783,7 @@ bun run infra:status
 bun run test:infra
 bun run test:orm
 bun run test:migrations
+bun run test:financial
 ```
 
 Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute

@@ -2640,3 +2640,264 @@ Evidência do segundo incremento: `bun run test:financial` passou 14 testes (6 W
 + 8 WagerTransaction), 149 expectativas. `DATABASE_URL=... bun run check` passou os
 395 casos existentes, typecheck e build. A disputa real pelo índice retornou um
 sucesso e um SQLSTATE 23505. As tabelas de wagering continuam intocadas.
+
+### Terceira parte: ledger imutável e integridade entre tabelas
+
+Migration20261023000003 cria wallet_ledger_entries. Cada linha contém ID, wallet_id,
+transaction_id, wallet_version, direction, amount/currency, balance_before,
+balance_after e created_at. WalletLedgerEntry continua sem dependências ORM: o campo
+wallet_version é metadado de persistência, obtido do WalletMovementResult existente
+(ou 1 na abertura). Não alteramos a classe para carregar uma preocupação SQL.
+
+A FK simples aponta à wallet; a FK composta (transaction_id,wallet_id,currency)
+aponta a wager_transactions. UNIQUE(transaction_id,wallet_id) impede dois lançamentos
+da mesma operação. UNIQUE(wallet_id,wallet_version) ordena e identifica cada movimento
+da carteira, também servindo a busca do predecessor/paginação futura. A versão 1 é
+reservada ao OPENING positivo; em abertura zero, o primeiro movimento é versão 2.
+Não usamos created_at para definir a sequência: relógios podem empatar ou divergir.
+
+O CHECK do ledger valida uma linha: DEBIT exige before - amount = after; CREDIT
+exige before + amount = after. Amount deve ser positivo; os três valores usam o
+tipo exato com limite/escala. Somente isso não garante que before seja o saldo real,
+que after corresponda à Wallet ou que a transação tenha sido processada. Essas
+relações precisam de FKs e verificações entre tabelas.
+
+**Constraint triggers diferíveis** executam a validação ao fim da transação por
+padrão. Elas deixam inserir as partes de uma escrita financeira em comandos SQL
+separados, mas recusam COMMIT se a estrutura final estiver incompleta. Podem ser
+antecipadas com SET CONSTRAINTS ALL IMMEDIATE. Não são tarefas assíncronas, não
+executam depois do commit e não corrigem dados silenciosamente.
+
+Três verificações se complementam:
+
+1. Cada INSERT de Wallet positiva ou UPDATE de saldo exige o lançamento da versão
+   correspondente, com before igual ao OLD.balance (zero na abertura) e after igual
+   ao NEW.balance. São examinados os eventos de cada UPDATE, não só o saldo final;
+   isso impede esconder movimentos intermediários. Abrir com zero exige ausência
+   de lançamento na versão 1.
+2. Cada INSERT no ledger exige transação PROCESSED com mesmo valor/moeda/wallet e
+   direção de acordo com kind/referência. Seu predecessor por versão precisa terminar
+   no seu before. Só versão 2 pode não ter predecessor, representando abertura zero.
+   A versão do lançamento não pode ultrapassar a Wallet; se for a última, after deve
+   ser o saldo atual. Versão 1 só aceita OPENING e before zero.
+3. Cada transação, em seu estado final no commit, deve ter exatamente um lançamento
+   se PROCESSED e financeira, e nenhum se LOSS/PENDING/PENDING_REFERENCE/REJECTED/FAILED.
+   A UNIQUE limita a um; a trigger exige existência. Lemos o estado final porque um
+   INSERT PENDING pode ter sido seguido por UPDATE PROCESSED na mesma transação SQL.
+
+A cadeia parte de zero ou do crédito OPENING, cada evento tem equação exata e um único
+número de versão, e a última entrada termina no saldo atual. Isso sustenta a igualdade
+entre saldo e ledger sem recalcular todo o histórico a cada escrita: as consultas
+normais usam chaves/índices para a linha correspondente e o predecessor. Os testes
+consultam a soma do ledger para verificar o resultado. Não criamos reconciliação API.
+
+A trigger BEFORE INSERT do ledger toma FOR NO KEY UPDATE na **wallet específica**.
+Esse lock SQL mantém escritas dessa carteira serializadas até o fim da transação,
+sem lock global. É defesa do schema; ainda não implementa o lock antecipado do futuro
+caso de uso, antes de decidir saldo. No teste, duas conexões leem 100.00 e tentam a
+mesma versão seguinte: só uma confirma, a outra falha no índice único. Isso não é
+uma implementação do cenário distribuído completo de apostas ou de retry automático.
+
+Encontramos um problema real ao testar: a primeira versão usava FOR UPDATE e o
+cenário concorrente recebeu **40P01 (deadlock)**, pois ambas as inserções de transação
+já mantinham locks de FK FOR KEY SHARE na wallet. A mudança para FOR NO KEY UPDATE
+mantém exclusão entre escritores de saldo, mas é compatível com KEY SHARE. Não mudamos
+o teste para aceitar deadlock: ele continua exigindo um sucesso e 23505. Futuramente,
+ordem de locks e tratamento de falhas transitórias continuarão necessários para
+operações envolvendo múltiplas linhas/carteiras.
+
+Referências oficiais: [constraints](https://www.postgresql.org/docs/17/ddl-constraints.html),
+[constraint triggers](https://www.postgresql.org/docs/17/sql-createtrigger.html),
+[locks por linha e conflitos](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-ROWS).
+
+### Funções SQL e triggers da terceira migration, uma a uma
+
+Todas ficam em `migrations/Migration20261023000003.ts`. Funções de trigger não
+recebem parâmetros SQL: PostgreSQL fornece OLD/NEW, TG_OP e TG_TABLE_NAME conforme
+o evento. Retorno trigger é NEW nas BEFORE que permitem a linha, NULL nas AFTER
+(o retorno é ignorado) ou exceção. Todas usam search_path fixo pg_catalog,public,
+security invoker, referências qualificadas e EXECUTE revogado de PUBLIC; não elevam
+privilégios. O engine chama a trigger vinculada, não um método da aplicação.
+
+| Função | Fluxo, resultado/erros, chamadores e justificativa |
+|---|---|
+| Migration20261023000003.up() → Promise<void> | Migrator agenda guarda dos dados anteriores, tabela/constraints, funções/triggers e grants; depende das migrations 1/2; erro reverte lote; não corrige/apaga saldo anterior |
+| bloco DO $guard$ | sem parâmetros/retorno de dados; antes do DDL verifica wallets fora de saldo0/version1 ou transações financeiras PROCESSED sem histórico (a tabela ledger ainda não existe); 23514 exige migration de histórico explícita; impede legitimar saldo anterior sem lastro |
+| reject_financial_mutation() | sempre lança 23514 com operação/tabela; BEFORE UPDATE/DELETE no ledger, DELETE em wallets, TRUNCATE nas três tabelas; protege até SQL normal do owner com triggers habilitadas; não protege contra owner/superuser que altera o schema |
+| guard_wallet_state() | BEFORE INSERT/UPDATE: INSERT exige version1; UPDATE preserva id/player/currency/created_at e exige incremento exatamente1 se saldo muda; saldo igual exige version/updated_at iguais; 23514 em desvio; retorna NEW |
+| lock_ledger_wallet() | BEFORE INSERT do ledger: SELECT da wallet FOR NO KEY UPDATE; ausente dá 23503; retorna NEW e mantém lock da linha até fim da transação; depende de privilégio de UPDATE já dado em colunas mutáveis |
+| check_wallet_movement() | AFTER INSERT/UPDATE, diferível: determina before de OLD ou zero; abertura zero verifica ausência de ledger1; UPDATE sem movimento retorna; demais buscam ledger por wallet/version e comparam before/after; 23514 se falta ou diverge, NULL em sucesso |
+| check_ledger_entry() | AFTER INSERT, diferível: carrega wallet/transação; confere status/kind/amount/wallet/currency, calcula direção (ROLLBACK consulta kind da referência), compara versão/saldo final e predecessor; 23514 em qualquer incompatibilidade; NULL em sucesso; FKs já asseguram existência |
+| check_transaction_ledger() | AFTER INSERT/UPDATE, diferível: relê transação pelo ID, testa EXISTS ledger e compara com PROCESSED não LOSS; 23514 quando efeito e ledger divergem; NULL em sucesso; UNIQUE/FK impedem multiplicidade ou vínculo a outra wallet |
+| Migration20261023000003.down() → Promise<void> | remove primeiro triggers instaladas em wallets/transações, depois ledger e suas triggers, por fim funções; sem CASCADE; destrói histórico e retira garantias, por isso demonstração exclusivamente descartável |
+
+| Trigger | Evento/timing | Função |
+|---|---|---|
+| ledger_immutable | BEFORE UPDATE/DELETE, linha | reject_financial_mutation |
+| ledger_no_truncate, wallets_no_truncate, wagers_no_truncate | BEFORE TRUNCATE, comando inteiro | reject_financial_mutation |
+| wallets_no_delete | BEFORE DELETE, linha | reject_financial_mutation |
+| guard_wallet_state | BEFORE INSERT/UPDATE, linha | guard_wallet_state |
+| lock_ledger_wallet | BEFORE INSERT, linha | lock_ledger_wallet |
+| wallet_movement_consistency | AFTER INSERT/UPDATE, linha, DEFERRABLE INITIALLY DEFERRED | check_wallet_movement |
+| ledger_entry_consistency | AFTER INSERT, linha, DEFERRABLE INITIALLY DEFERRED | check_ledger_entry |
+| transaction_ledger_consistency | AFTER INSERT/UPDATE, linha, DEFERRABLE INITIALLY DEFERRED | check_transaction_ledger |
+
+wager_app só recebe SELECT/INSERT no ledger. UPDATE/DELETE/TRUNCATE já falham por
+permissão (42501); triggers dão segunda proteção se alguém conceder DML indevidamente.
+TRUNCATE precisa de trigger própria, pois não dispara DELETE por linha. App também
+não pode desabilitar triggers nem usar session_replication_role=replica. Migrations
+rodam com papel administrativo separado, nunca com credencial da aplicação.
+
+### Helpers e testes da integração completa
+
+| Helper / arquivo | Parâmetros, retorno, fluxo e erros |
+|---|---|
+| insertLedger — infra/test/financial-schema-support.ts | sql:SQL, patch:Partial<LedgerFixture>={} → Promise<void>; preenche fixture de crédito25/version2/100→125, aplica patch e INSERT parametrizado; só testes chamam; PostgreSQL valida e erros propagam |
+| openFundedWallet — mesmo arquivo | sql:SQL → Promise<void>; abre sql.begin, insere wallet100, OPENING100 PROCESSED e ledger1 0→100; commit executa verificações; erro faz rollback; fixture de teste, não caso de uso implementado |
+| walletState — infra/test/financial-ledger.test.ts | sql:SQL → Promise de linhas balance/version text; SELECT ordenado por id, usado nas asserções antes/depois; consulta real, erro propaga |
+| credit — mesmo arquivo | sql:SQL, id='win-1', before='100.00', after='125.00':strings, version=2:number → Promise<void>; insere WIN25 processada, ledger e UPDATE wallet; exige conexão transacional fornecida pelo teste, não calcula saldo; erro propaga e sql.begin externo reverte |
+
+LedgerFixture é DTO de teste: strings para IDs/direção/moeda/dinheiro; number só para
+versão. Nenhum helper de teste fica no domínio ou é exportado como serviço da aplicação.
+Callbacks de sql.begin recebem conexão transacional, retornam Promise<void> e confirmam
+somente após as constraints; em erro, Bun faz rollback. Callbacks de matrizes repetem
+SQL real e asserções, não substituem funções de banco.
+
+Os testes em infra/test/financial-ledger.test.ts aplicam **as três migrations**:
+
+| Teste (nome inicial no arquivo) | Entradas, lógica e comprovação |
+|---|---|
+| full schema accepts zero opening... | wallet zero sem ledger e positiva com trio coerente; saldo/version e soma conferidos |
+| positive opening without ledger fails... | INSERT wallet100 isolado falha 23514 no commit, consulta não encontra linha |
+| wallet cannot change balance alone... | saldo/version/data alterados sem correspondência e identidade alterada pelo owner → 23514; saldo100/version1 preservados |
+| processed financial transaction without ledger fails... | BET processada isolada falha; LOSS zero, rejeição e pendência são aceitas sem ledger |
+| deferred checks allow ledger before status... | tentativa sem UPDATE wallet aborta; depois ledger inserido enquanto WIN está PENDING, seguido de Wallet e PROCESSED, confirma125/version2; prova estado final diferível |
+| ledger enforces arithmetic... | 12 patches inválidos: equação, negativos, zero, escala, teto, NaN, direção, versão, moeda, tx/wallet ausentes; 23514 ou23503 exatos |
+| ledger is immutable for app and owner... | app recebe42501 e owner23514 em UPDATE/DELETE/TRUNCATE; TRUNCATE CASCADE nas origens e DELETEwallet bloqueados; app não desabilita trigger/replicação |
+| ledger uniqueness prevents a transaction... | segundo lançamento por transação/wallet ou por versão recebe23505 |
+| ledger rejects pending, rejected, failed and LOSS... | entradas com equação válida ligadas a resultados sem efeito falham23514, mesmo com UPDATEsaldo correspondente |
+| ledger rejects mismatched transaction amount... | WIN25 contra ledger20 ou direçãoDEBIT falha23514; não basta equação correta |
+| wallet event checks prevent fabricating... | before90 contra wallet100 e salto versão1→3 rejeitados; estado anterior preservado |
+| multiple movements in one SQL transaction... | dois créditos25 com UPDATEs separados formam versões2/3, saldo150, soma150 |
+| first movement on a zero wallet... | OPENING na versão2 falha; WIN normal versão2 0→25 confirma |
+| BET, REFUND and ROLLBACK... | cadeia de BET, REFUND, ROLLBACKrefund, ROLLBACKbet, WIN, ROLLBACKwin confirma direções/referências e retorna saldo100/version7 |
+| forced SQL failure rolls back... | trio válido seguido de divisão por zero22012; consultas comprovam que saldo, status e ledger novos não foram persistidos |
+| SET CONSTRAINTS IMMEDIATE exposes... | força validação de alteração incompleta antes de COMMIT; recebe23514 e preserva saldo |
+| all financial migrations reverse and reapply... | up repetido vazio; down0 deixa apenas histórico de migrations e nenhuma função pública; up reconstrói3 migrations e aceita abertura válida |
+| ledger migration refuses preexisting... | aplica só1/2, grava saldo anterior sem lastro, tenta3 e recebe erro; saldo anterior continua100, ledger não criado, histórico permanece2 |
+| concurrent stale writers use distinct sessions... | duas sql.begin consultam saldo100 e PIDs distintos; barreira Promise libera ambas somente após leitura; um crédito confirma, outro23505; saldo125/version2 e apenas abertura+um movimento persistidos |
+| SQL preserves exact cents... | WIN0.10 seguida de WIN0.20 em walletzero produz0.30/version3, sem number monetário |
+
+No teste concorrente, callback do construtor Promise armazena release, callbacks map
+abrem as duas conexões e contam chegadas, filter/find inspecionam resultados; Set de
+PIDs comprova sessões distintas. A barreira não serializa escritas nem simula o banco.
+Timeout15s impede teste sem limite caso uma regressão impeça completar as duas leituras.
+
+### Responsabilidades restantes e limites operacionais
+
+Classes de domínio continuam validando entradas e transições em memória, com erros
+expressivos. Banco garante estrutura, unicidade, equações, imutabilidade e correspondência
+financeira nos commits testados. O futuro mapper transformará snake_case/null em
+props/undefined, strings numéricas em Money (escala2) e chamará rehydrate; version de
+bigint será convertida só após verificar o limite seguro. Ainda não há entidades ORM
+financeiras registradas, mappers de produção nem repositórios: a integração usa SQL
+real via MikroORM/Bun e migrations oficiais. Não usamos auto-sync com entities vazio.
+
+O futuro caso de uso fará admissão idempotente, leitura da wallet com lock antes do
+cálculo, domínio, persistência de cada movimento, resultado original e Inbox/Outbox na
+mesma unidade SQL. Se aplicar várias transições da mesma Wallet num lote, precisará
+persistir cada UPDATE/version e ledger, não condensar vários movimentos num único
+UPDATE final via Unit of Work. Alternativamente, uma operação por wallet/transação SQL.
+As triggers não tomam essa decisão de orquestração nem criam lançamentos automaticamente.
+
+Inbox/Outbox não foram criadas. Sua futura inserção deve usar a mesma conexão/transação
+financeira; ainda não há garantia de evento durável ou ACK pós-commit. Replay ainda
+precisa guardar também resultado de LOSS/rejeições, que não têm ledger. Retries/TTL,
+≥3 instâncias, recuperação de crash e locks nos casos de uso permanecem futuros.
+A trigger evita que uma escrita inconsistente confirme, mas não implementa resposta
+adequada ao provedor, retry, métricas ou coordenação de workers.
+
+Migrations foram aplicadas/revertidas somente em bancos dwp_test descartáveis. A guarda
+da terceira migration recusa dados anteriores sem histórico em vez de apagá-los ou
+inventar lançamentos. DOWN de ledger retira suas garantias e perde histórico; reexecutar
+UP sobre efeitos remanescentes falhará, exigindo plano explícito de migração de dados.
+A demonstração down0/up ocorre em banco descartável, nunca como recuperação de produção.
+
+### Visão das tabelas e evidências finais da etapa
+
+```mermaid
+erDiagram
+    wallets ||--o{ wager_transactions : "wallet e jogador/moeda"
+    wallets ||--o{ wallet_ledger_entries : "histórico por versão"
+    wager_transactions ||--o| wallet_ledger_entries : "um efeito financeiro"
+    wager_transactions o|--o{ wager_transactions : "referência interna resolvida"
+    wallets {
+        text id PK
+        text player_id
+        text currency
+        numeric balance
+        bigint version
+    }
+    wager_transactions {
+        text id PK
+        text wallet_id FK
+        text provider_id
+        text external_transaction_id
+        text idempotency_key
+        text payload_hash
+        text kind
+        text status
+        numeric amount
+        text reference_transaction_id FK
+    }
+    wallet_ledger_entries {
+        text id PK
+        text wallet_id FK
+        text transaction_id FK
+        bigint wallet_version
+        text direction
+        numeric amount
+        numeric balance_before
+        numeric balance_after
+    }
+```
+
+O diagrama omite datas/códigos/alguns campos para destacar relações; as migrations
+são a definição completa. A referência interna é opcional e não é o ID externo do
+provedor. Para transação PROCESSED financeira a cardinalidade efetiva de ledger é
+exatamente1; nos demais resultados ela é0, verificada pela trigger.
+
+Comandos executados, apenas credenciais locais:
+
+```bash
+export PATH="$PWD/.tools/node_modules/.bin:$PATH"
+bun run test:financial
+DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering bun run check
+bun run test:infra
+bun run test:orm
+bun run test:migrations
+git diff --check
+docker compose exec -T postgres psql -U wager_app -d wagering \
+  -c "SELECT tablename FROM pg_tables WHERE schemaname='public';"
+```
+
+| Verificação final | Resultado real |
+|---|---|
+| test:financial | 34 passaram, 0 falharam, 272 expectativas; 6 Wallet +8 Wager +20 Ledger |
+| check | 395 passaram, 0 falharam, 2270 expectativas; typecheck/build aprovados |
+| PostgreSQL/SQS | 2 +4 passaram, incluindo persistência/reinícios/recriação e DLQ |
+| ORM/Nest | 2 passaram |
+| Migrations de infraestrutura | 2 passaram, incluindo falha de lote e reversão |
+| Banco principal wagering | SELECT catálogo retornou 0 tabelas públicas; migrations financeiras não aplicadas |
+
+Total **439 casos distintos**, sendo34 novos. Execuções parciais/repetidas não foram
+somadas outra vez. A falha intermediária40P01 do teste concorrente foi reproduzida,
+corrigida e substituída pelo resultado esperado23505 na execução final. As mensagens
+23514 (CHECK/trigger),23503 (FK),23505 (UNIQUE),23502 (NOT NULL),42501 (permissão) e22012
+(falha forçada) foram verificadas por SQLSTATE, não apenas por texto genérico de erro.
+
+O README oficial permaneceu preservado; o domínio e seus testes não foram alterados.
+Há três migrations e três suítes financeiras, suporte de testes, comando dedicado e
+documentação. A etapa termina aqui: próximo trabalho sugerido é mapeamento/repositórios
+e unidade transacional com lock antecipado, após autorização; eventos e Outbox devem
+preceder disponibilização do processamento completo conforme suas dependências.

@@ -20,3 +20,19 @@ Migration20261023000002 acrescenta wager_transactions, referências, constraints
 índices e trigger de lifecycle. Seu down preserva wallets; reverta migrations
 posteriores primeiro. Funções SQL ficam versionadas na própria migration para que
 mudanças futuras no domínio TypeScript não alterem o histórico de DDL.
+
+
+Migration20261023000003 cria ledger, imutabilidade e consistência entre as três tabelas.
+Exige que dados anteriores ainda não tenham efeitos financeiros sem histórico;
+caso contrário falha, sem apagá-los. O comando `bun run test:financial` testa as
+três migrations pelo Migrator oficial em bancos novos descartáveis, inclusive up
+repetido, down e reaplicação. Não usar auto-sync/schema:fresh.
+
+DOWN destrói histórico. Depois de reverter só a terceira migration, wallets com
+saldo/version acumulados não permitem reaplicação sem um plano de reconstrução de
+histórico. Não desative a guarda para contornar isso. A demonstração de reversibilidade
+completa usa down até 0 e up num banco descartável, sem dados a preservar.
+
+As funções SQL estão embutidas nas migrations, não importadas do código de domínio
+que pode evoluir. Somente a credencial de migrations aplica DDL. App tem DML limitado;
+nenhuma migration foi aplicada ao banco wagering durante esta etapa.

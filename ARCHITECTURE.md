@@ -171,13 +171,16 @@ descartável, sem prometer reversão segura de dados reais.
 ## Limitações atuais
 
 Money, WalletLedgerEntry, Wallet e WagerTransaction possuem invariantes locais testadas. Wallet
-produz lançamentos em memória para cada mudança de saldo aceita; não há garantia
-persistente entre entidades nesta etapa.
-Não existem ledger persistido, processamento, migrations de schema financeiro, idempotência, autenticação,
-reconciliação, métricas ou testes distribuídos. As garantias financeiras entre
-entidades continuam pendentes. Os testes reais de infraestrutura provam conexão, configuração,
-mensageria, persistência PostgreSQL e rollback de migrations/transações de prova;
-não provam atomicidade financeira entre wallet, ledger, inbox e outbox.
+produz lançamentos em memória para cada mudança de saldo aceita. A correspondência
+persistente Wallet/Transaction/Ledger está protegida pelo schema testado via SQL;
+a aplicação Nest ainda não possui o caso de uso que escreve nessas tabelas.
+O schema financeiro e suas proteções estão versionados e validados em bancos
+descartáveis (ADR-012); não foram aplicados ao banco principal. Não existem casos de
+uso financeiros, mappers/repositórios financeiros, replay completo, autenticação,
+reconciliação, métricas ou testes distribuídos completos. Atomicidade com Inbox/Outbox
+e recuperação de processamento continuam pendentes. Os testes reais de infraestrutura provam conexão, configuração,
+mensageria, persistência PostgreSQL e rollback de migrations. Testes de schema provam
+consistência Wallet/Transaction/Ledger por SQL; não provam atomicidade com inbox/outbox.
 
 ## ADR-010 — Wallet, abertura com lançamento e confirmação local do estado
 
@@ -586,3 +589,46 @@ referência processada compatível. Referência externa permanece sem FK para ac
 ordem de chegada invertida. Índices parciais reservam somente reversões/OPENING
 PROCESSED; índices de pendentes/histórico/referência atendem buscas futuras.
 Não há validação de efeito financeiro no ledger até o terceiro incremento.
+
+
+Terceiro incremento ADR-012: wallet_ledger_entries tem PK, FKs, UNIQUE(transaction_id,
+wallet_id), UNIQUE(wallet_id,wallet_version), equação e valores validados. O índice de
+versão também permite busca de predecessor e futura paginação estável sem depender
+do relógio. Currency é protegida pela FK composta à transação, que referencia a wallet.
+
+BEFORE triggers impedem mutação/exclusão de ledger, exclusão de wallets, TRUNCATE nas
+três tabelas, mudança da identidade da wallet e salto/alteração indevida de version.
+Permissões do app bloqueiam essas operações independentemente das triggers.
+Constraint triggers DEFERRABLE INITIALLY DEFERRED validam cada evento de saldo contra
+seu ledger/version; cada ledger contra operação PROCESSED, direção, valor, predecessor
+e último saldo; cada transação contra a existência/ausência de ledger em seu estado
+final. Abertura positiva exige OPENING/version1/0→saldo; zero não produz entrada1.
+São consultas indexadas locais, sem varrer/somar todo histórico a cada movimento.
+
+Para proteger a validação das escritas concorrentes, BEFORE INSERT do ledger toma
+FOR NO KEY UPDATE somente na wallet. A primeira tentativa com FOR UPDATE produziu
+deadlock40P01 no teste de duas sessões que já possuíam KEY SHARE das FKs. O modo
+mais fraco preserva exclusão entre escritores de saldo e é compatível com essas FKs;
+o teste mantém exigência de um sucesso e um23505, sem aceitar deadlock como sucesso.
+Isso é defesa SQL do schema, não implementação de lock/caso de uso de apostas.
+Nenhuma garantia de ausência universal de deadlocks foi demonstrada.
+
+Correspondência é verificada por evento: várias mudanças na mesma wallet numa unidade
+SQL exigem vários UPDATEs/version e seus respectivos ledgers. Um futuro mapper/Unit
+of Work não poderá condensar esse lote em um UPDATE final sem preservar movimentos.
+Múltiplas operações não são coordenadas por esta etapa. Não há Inbox/Outbox operacionais,
+publicação, replay, processamento distribuído nem controle de tentativas/TTL.
+
+A terceira migration recusa dados financeiros preexistentes sem histórico, sem
+corrigi-los/destruí-los. Seu down remove ledger/garantias; reaplicar sobre efeitos que
+restaram exige migration de dados explícita. Roundtrip down0/up é ensaiado apenas em
+bancos descartáveis. Principais limitações: owner/superuser pode alterar DDL e desativar
+proteções; entrada já arredondada pelo cliente não pode ser recuperada; identificadores
+text estão sujeitos aos limites físicos dos índices PostgreSQL. Valores acima do teto
+de armazenamento são recusados embora Money consiga calculá-los.
+
+Mapeamento futuro: Wallet ↔ wallets; WagerTransaction ↔ wager_transactions;
+WalletLedgerEntry + walletVersion ↔ wallet_ledger_entries. IDs são texto; Money é
+amount/currency (balance na wallet); null se torna undefined e datas viram Date.
+Migrations oficiais SQL independem de EntitySchemas. Não antecipamos repositórios;
+a futura implementação manterá domínio sem decorators Nest/ORM e dinheiro em strings.

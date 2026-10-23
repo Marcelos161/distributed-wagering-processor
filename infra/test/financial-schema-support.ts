@@ -76,3 +76,34 @@ export async function insertTransaction(sql: SQL, patch: Partial<TransactionFixt
     ${row.round},${row.game},${row.kind},${row.amount},${row.currency},${row.status},${row.externalReference},
     ${row.reference},${row.failure},'2026-10-23T12:00:00Z',${row.processedAt})`;
 }
+
+export interface LedgerFixture {
+  id: string;
+  transaction: string;
+  wallet: string;
+  version: number;
+  direction: string;
+  amount: string;
+  currency: string;
+  before: string;
+  after: string;
+}
+
+export async function insertLedger(sql: SQL, patch: Partial<LedgerFixture> = {}): Promise<void> {
+  const row: LedgerFixture = { id: 'entry-1', transaction: 'win-1', wallet: 'wallet-1', version: 2,
+    direction: 'CREDIT', amount: '25.00', currency: 'BRL', before: '100.00', after: '125.00', ...patch };
+  await sql`INSERT INTO wallet_ledger_entries (id,wallet_id,transaction_id,wallet_version,direction,
+    amount,currency,balance_before,balance_after,created_at)
+    VALUES (${row.id},${row.wallet},${row.transaction},${row.version},${row.direction},${row.amount},
+    ${row.currency},${row.before},${row.after},'2026-10-23T12:01:00Z')`;
+}
+
+/** Test fixture only; this is not an application opening use case. */
+export async function openFundedWallet(sql: SQL): Promise<void> {
+  await sql.begin(async (connection) => {
+    await insertWallet(connection, 'wallet-1', '100.00');
+    await insertTransaction(connection, { id: 'opening', kind: 'OPENING', amount: '100.00', status: 'PROCESSED' });
+    await insertLedger(connection, { id: 'opening-entry', transaction: 'opening', version: 1,
+      amount: '100.00', before: '0.00', after: '100.00' });
+  });
+}
