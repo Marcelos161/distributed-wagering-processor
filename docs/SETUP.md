@@ -266,3 +266,18 @@ O schema novo não é criado no startup do Nest. As entidades ORM financeiras ai
 não estão registradas; `entities: []` não deve alimentar sincronização automática.
 Antes da aplicação em qualquer banco com dados, revisar as três migrations e a guarda
 de histórico; testes usam exclusivamente bancos dwp_test criados/removidos pelo helper.
+
+### Testes dos mappers financeiros
+
+```bash
+bun test ./test/financial-mappers.test.ts
+bun run test:persistence
+```
+
+`test:persistence` executa `infra/test/persistence-*.test.ts`, cria bancos
+`dwp_test_*`, aplica migrations neles e usa credenciais de aplicação para as
+consultas financeiras. Nunca execute migration:up no principal para preparar esses
+testes. Docker/PostgreSQL precisam estar saudáveis. Para `bun run check`, configure
+`DATABASE_URL` local como em `.env.example`: o teste HTTP inicia Nest e valida a
+conexão. A ausência dessa variável causa falha de configuração, não deve ser
+substituída por mock.

@@ -156,3 +156,9 @@ o teste de driver confirma dinheiro string, e o desenho de mapeamento está na A
 Próxima etapa recomendada, após autorização: mapeamento/repositórios financeiros e
 unidade transacional com lock por wallet. Eventos e Outbox continuam necessários
 antes de expor processamento com publicação; não saltar suas dependências no plano.
+
+Etapa complementar à 8 autorizada: mappers, repositórios e unidade transacional com
+lock. Primeiro incremento: mappers explícitos e roundtrip com PostgreSQL descartável,
+sem mudanças nas entidades ou migrations. Repositórios, atomicidade via MikroORM e
+concorrência ainda serão validados nos incrementos seguintes. Não autoriza endpoints,
+processadores, Inbox/Outbox operacionais ou publicação.

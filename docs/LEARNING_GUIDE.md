@@ -2901,3 +2901,77 @@ Há três migrations e três suítes financeiras, suporte de testes, comando ded
 documentação. A etapa termina aqui: próximo trabalho sugerido é mapeamento/repositórios
 e unidade transacional com lock antecipado, após autorização; eventos e Outbox devem
 preceder disponibilização do processamento completo conforme suas dependências.
+
+## 17. Mappers financeiros: domínio ↔ registros SQL
+
+Um **mapper** traduz representações, sem executar uma operação financeira. Um registro
+SQL usa `player_id`, `NULL`, texto decimal e datas; o domínio usa `playerId`, `undefined`,
+Money e construtores encapsulados. Reidratar R$100 já persistidos não credita R$100
+novamente. Não criamos IDs/datas e não chamamos `credit`, `debit` ou `markProcessed`.
+As três migrations continuam sendo a autoridade das invariantes persistidas.
+
+Todos os métodos abaixo são síncronos. Os mappers não têm construtor próprio nem
+estado; futuramente serão chamados pelos adaptadores de repositório. Dependem só
+do domínio e de outros mappers, sem decorators/EntitySchemas na entidade financeira.
+Os tipos `*Record` descrevem uma linha SQL; são contratos TypeScript, não validadores
+universais de entrada HTTP. As factories de domínio continuam validando estrutura.
+
+| Arquivo / operação | Parâmetros → retorno | Fluxo, erros, motivo e exemplo |
+|---|---|---|
+| `src/infrastructure/persistence/financial/money-mapper.ts` — `MoneyMapper.toDomain` | `amount: string, currency: string → Money` | Verifica decimal não negativo com até 2 casas; separa texto; remove zeros iniciais; limita parte inteira a 18 dígitos; completa casas; chama Money.from. TypeError para representação inválida, RangeError para teto, MoneyError para moeda. `0.1/BRL → Money(0.10/BRL)`. Não arredonda `1.005` nem aceita `1.000`, conforme CHECK scale. |
+| mesmo — `MoneyMapper.toRecord` | `money: Money → string` | Lê toJSON e passa pela mesma fronteira para validar teto/sinal; retorna duas casas. Negativo obtido por negate é legítimo no cálculo de Money, mas proibido nas três tabelas: recusado, nunca convertido em positivo. Money continua podendo calcular acima do teto; armazenamento não. |
+| mesmo — `readVersion` | `value: string → number` | Exige inteiro textual positivo e compara BigInt ao MAX_SAFE_INTEGER antes de Number. RangeError em falha. **Somente contador** usa number; dinheiro nunca. Usado por Wallet/LedgerMapper. |
+| mesmo — `writeVersion` | `value: number → string` | Exige inteiro seguro ≥1, retorna String; RangeError se inválido. Ex.: 2 → `"2"`. |
+| `wallet-mapper.ts` — `WalletMapper.toDomain` | `row: WalletRecord → Wallet` | Converte balance/versão e nomes; chama Wallet.rehydrate com IDs, moeda e ambas as datas existentes. Erros dos helpers/factory propagados. Não abre carteira nem cria ledger. |
+| mesmo — `WalletMapper.toRecord` | `wallet: Wallet → WalletRecord` | Lê getters, valida dinheiro/versão, retorna campos SQL. Getters de Date devolvem cópias; alterar a linha não altera a Wallet. |
+| `wager-transaction-mapper.ts` — `WagerTransactionMapper.toDomain` | `row: WagerTransactionRecord → WagerTransaction` | Converte Money, null→undefined, nomes e lifecycle inteiro; rehydrate valida enum/estrutura. Cast de enum não substitui essa validação. Referência persistida é preservada sem buscar/processar sua BET novamente. |
+| mesmo — `WagerTransactionMapper.toRecord` | `transaction: WagerTransaction → WagerTransactionRecord` | Extrai identidade, payloadHash, dinheiro, estado, referências, failureCode e timestamps; undefined→null. Erros de MoneyMapper propagam. Não recalcula hash nem estado. |
+| `ledger-entry-mapper.ts` — `LedgerEntryMapper.toDomain` | `row: LedgerEntryRecord → VersionedLedgerEntry` | Converte três valores Money, reidrata entry e lê wallet_version; devolve envelope congelado `{entry,walletVersion}`. Versão é metadado de persistência, não campo novo no domínio. Rehydrate não reexecuta a equação, já protegida no SQL. |
+| mesmo — `LedgerEntryMapper.toRecord` | `entry: WalletLedgerEntry, walletVersion: number → LedgerEntryRecord` | Extrai entry imutável e versão explícita da movimentação. Valida dinheiro/contador; mantém data. Ex.: crédito R$0,10, antes R$0,20, depois R$0,30, versão2. |
+
+A normalização é exata por operações de texto. Não utilizamos parseFloat, números
+binários ou arredondamento. `999999999999999999.99` permanece igual. Versões são
+selecionadas como `::text` para não depender da política do driver para bigint.
+
+**Testes deste incremento.** Em `test/financial-mappers.test.ts`, callbacks de
+`test.each` recebem o amount/version ou status/failure da tabela e retornam void:
+normalização (5 casos), representação recusada (9), versões recusadas (4), lifecycle
+(4). Os demais callbacks sem argumentos conferem input number/negativo/teto,
+limite de contador, Wallet e datas defensivas, referência processada sem replay,
+null/enum inválido e ledger com versão separada. Um snapshot propositalmente
+desequilibrado demonstra que rehydrate não chama create; esse snapshot **não é
+persistido** e o CHECK SQL continuaria recusando-o.
+
+`infra/test/persistence-mappers.test.ts` tem um callback async (`Promise<void>`):
+withFinancialDatabase cria banco descartável e aplica três migrations; fixture grava
+abertura máxima e WIN aguardando referência em uma transação com usuário app;
+MikroORM com applicationUrl lê as três tabelas; mappers fazem roundtrip de todos os
+campos; contagem confirma que ler não criou novo ledger. `finally` fecha o ORM e o
+helper remove só o banco descartável. Falhas SQL/assertions falham o teste. Nenhum
+mock substitui o PostgreSQL e nenhuma migration é aplicada ao banco principal.
+
+O primeiro roundtrip real revelou que `em.execute` devolve timestamptz como **string**
+(não Date). Foi corrigido na fronteira: `timestamp-mapper.ts/readTimestamp(value:
+Date|string): Date` valida formato com fuso explícito e no máximo milissegundos,
+constrói uma cópia Date, recusa valor não finito com TypeError. Os três toDomain
+utilizam esse helper; toRecord devolve cópias Date, aceitas pelo driver na escrita.
+Ex.: `2026-10-23 09:34:56.789-03` → `2026-10-23T12:34:56.789Z`. Não inventa fuso para
+texto ambíguo. O teste `timestamp mapping requires timezone and retains milliseconds`
+recebe nenhum parâmetro, importa o helper, valida conversão/fuso/invalidade e retorna
+Promise<void>. O teste SQL compara datas com instantes conhecidos, não exige que a
+representação textual do driver seja idêntica à representação Date de saída.
+
+O segundo teste SQL, `processed reference and terminal failures survive PostgreSQL
+rehydration`, é callback sem argumentos → Promise<void>. Em banco isolado, cria uma
+wallet zero, WIN de R$1, BET de R$0,30 e prêmio de R$0,10 ligado à BET, além de
+REJECTED/FAILED sem ledger. Cada mudança usa um UPDATE e um lançamento próprios,
+na mesma transação. O mapper recupera referência interna/externa, status, falhas e
+datas; a consulta final exige saldo `0.80`/versão4. Erro SQL ou divergência falha o
+teste; finally fecha conexão. A fixture prova conversão/constraints, não é caso de
+uso público nem implementação de Inbox/Outbox/idempotência distribuída.
+
+Validação do incremento de mappers: `bun run check` com DATABASE_URL local passou
+(typecheck, 424 testes da aplicação e build); `bun test
+./infra/test/persistence-mappers.test.ts`: 2/2; `bun run test:financial`: 34/34.
+A primeira tentativa do check sem DATABASE_URL falhou na inicialização HTTP;
+a execução correta usou a configuração local documentada, sem modificar o teste.

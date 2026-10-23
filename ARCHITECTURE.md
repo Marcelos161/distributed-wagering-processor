@@ -632,3 +632,13 @@ WalletLedgerEntry + walletVersion ↔ wallet_ledger_entries. IDs são texto; Mon
 amount/currency (balance na wallet); null se torna undefined e datas viram Date.
 Migrations oficiais SQL independem de EntitySchemas. Não antecipamos repositórios;
 a futura implementação manterá domínio sem decorators Nest/ORM e dinheiro em strings.
+
+## ADR-013 — Fronteira explícita de mapeamento financeiro
+
+Mappers independentes do ORM traduzem registros SQL em factories rehydrate e vice-versa.
+Money permanece sem teto aritmético; a fronteira de armazenamento aplica limite de
+18 inteiros/2 decimais e não negatividade, normalizando apenas texto exato. Não há
+mudança no domínio nem repetição de transições. Ledger transporta walletVersion em
+envelope separado; datas e referências são preservadas. A alternativa de decorators
+no domínio foi descartada para preservar encapsulamento e isolamento. A estratégia
+específica de escrita dos repositórios será registrada no próximo incremento.
