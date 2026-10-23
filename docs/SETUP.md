@@ -304,3 +304,33 @@ e `repos.outbox` além dos três repositórios anteriores. Todos compartilham a 
 `outbox.listDue(now,limit)` é consulta, não publisher; não envia SQS nem faz claim.
 Os testes concorrentes observam locks reais, portanto precisam do PostgreSQL saudável.
 `test:infra` continua reiniciando serviços; não execute junto de testes financeiros.
+
+### Criação transacional de carteiras
+
+```bash
+bun run test:wallet-creation
+```
+
+Executa `infra/test/wallet-creation-*.test.ts` contra PostgreSQL real, com quatro
+migrations em bancos dwp_test_* descartáveis. Cobre também composição Nest/UUID/clock,
+rollback e concorrência entre instâncias ORM. Não precisa aplicar migrations em
+wagering. A composição de Nest exporta CreateWallet para futura API, mas não existe
+POST /wallets. Não execute chamadas manuais de abertura no banco principal nesta etapa.
+
+Para validar o conjunto, com Docker saudável e DATABASE_URL local configurado:
+
+```bash
+bun run check
+bun run test:wallet-creation
+bun run test:financial
+bun run test:persistence
+bun run test:messaging
+bun run test:orm
+bun run test:migrations
+bun run test:infra
+```
+
+O último comando reinicia os serviços: execute-o somente depois dos demais. Os testes
+de falha instalam triggers temporários exclusivamente no banco descartável ou injetam
+uma exceção na factory; nunca desativam constraints financeiras. A contagem das
+cinco tabelas após rollback e a espera observada no servidor são as evidências.

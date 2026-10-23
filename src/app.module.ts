@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { HealthController } from './infrastructure/http/health.controller.js';
-import { PersistenceModule } from './infrastructure/persistence/persistence.module.js';
+import { WalletApplicationModule } from './infrastructure/application/wallet-application.module.js';
 
-@Module({ imports: [PersistenceModule], controllers: [HealthController] })
+@Module({ imports: [WalletApplicationModule], controllers: [HealthController] })
 export class AppModule {}

@@ -809,3 +809,62 @@ e [AWS Transactional Outbox](https://docs.aws.amazon.com/prescriptive-guidance/l
 A Outbox evita perda entre commit e intenção de publicação, mas a publicação pode
 repetir depois de falha entre envio e registro published. Consumidores precisarão
 deduplicar eventId persistente; FIFO não substitui esse contrato.
+
+## ADR-020 — Caso de uso CreateWallet
+
+A camada de aplicação coordena as factories reais e a FinancialUnitOfWork existente.
+CreateWallet não importa Nest/ORM, não executa SQL e não publica eventos. Entrada é
+playerId + MoneyProps; saída é snapshot plain profundamente congelado com id, playerId,
+balance e version, conforme README. A Promise só resolve após COMMIT. Criar o DTO no
+callback não o entrega ao chamador antes da resolução de run; erro diferível rejeita
+também execute. Nenhuma instância de Wallet/Transaction é guardada entre chamadas.
+
+Admissão verifica playerId, Money.from e teto de armazenamento999999999999999999.99
+antes de abrir transação. Essa verificação usa Money, nunca number; o domínio conserva
+capacidade aritmética e o DOMAIN PostgreSQL continua sendo a autoridade final.
+Não houve alteração em entidades, schema, migrations, permissões ou níveis de isolamento.
+
+Ordem: Wallet.open → INSERT Wallet → createOpening/markProcessed → INSERT OPENING
+→ INSERT ledger → INSERT dois eventos Outbox. A factory Wallet.open já cria o CREDIT
+em memória; não repetimos a operação com wallet.credit, que incrementaria versão.
+As FKs são imediatas e as verificações de correspondência saldo/ledger são diferíveis.
+Saldo zero persiste somente Wallet versão1. Inbox é omitida porque a origem futura
+será API, e não recepção de mensagem. Não há transação aninhada nem SELECT preventivo
+para unicidade;23505 é traduzido apenas para wallets_player_currency_unique (seção24
+do guia). Outros erros mantêm causa/origem. Não há retry/replay automático de abertura.
+
+**Metadados aprovados pelo usuário:** providerId reservado internal:wallet-opening;
+roundId/gameId wallet-opening; externalTransactionId e idempotencyKey iguais ao ID da
+OPENING. SHA-256 sobre JSON de campos fixos/ordem fixa, valores Money normalizados e
+data UTC, contrato versão1. Inclui IDs da carteira/transação/ledger, jogador e metadados.
+É hash de identidade/conteúdo dessa abertura interna, não chave para replay HTTP nem
+assinatura de autenticidade. Uma nova tentativa tem novos IDs. A admissão futura de
+provedores deverá proibir esse namespace; não há tal endpoint implementado nesta etapa.
+Alternativa discutida: tabela/modelo independente para abertura, com mudanças de schema.
+Escolha mantém o modelo aprovado pelo README e evita uma segunda representação.
+
+IdGenerator.next e Clock.now são portas pequenas. Produção usa randomUUID (v4) e Date;
+testes fornecem sequência/data fixa. UUID não determina ordem de eventos: futura
+ordenação por carteira precisa de versão/contrato, não comparação lexical de IDs.
+Gerar IDs/datas nas entidades dificultaria testes e acoplaria o domínio ao runtime.
+Um helper privado usa node:crypto para SHA-256, disponível no Bun testado; não criamos
+serviço genérico de hashing ou canonicalização de payloads externos antecipadamente.
+Eventos usam correlationId=wallet.id e causationId=OPENING.id, com o mesmo timestamp
+da abertura. Propagação de trace/request HTTP é uma preocupação de etapa futura.
+
+WalletApplicationModule faz a composição por useFactory e exporta CreateWallet.
+AppModule o importa, preservando PersistenceModule e health. Não cria rota financeira.
+Instanciar o módulo não aplica migrations nem grava carteiras. O banco principal
+continua sem schema financeiro; a utilização real do caso de uso foi testada somente
+em bancos dwp_test_* migrados e removidos pelo suporte existente.
+
+Provas: consultas após commit, um único xmin para os cinco INSERTs; observador não
+enxerga registros antes do commit; falhas de factory/escrita/constraint diferível
+revertem tudo. Concorrência usa duas instâncias ORM, barreiras e pg_blocking_pids:
+mesma chave espera e conflita após commit, ou prossegue após rollback; outro jogador
+confirma durante espera. Testes não provam HTTP, publicação SQS ou recuperação de
+resultado quando a conexão cai exatamente após confirmação do servidor.
+
+Referências primárias: [unicidade PostgreSQL](https://www.postgresql.org/docs/17/index-unique-checks.html),
+[constraints diferíveis](https://www.postgresql.org/docs/17/sql-set-constraints.html),
+[UUID e crypto](https://nodejs.org/api/crypto.html#cryptorandomuuidoptions).

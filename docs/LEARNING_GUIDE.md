@@ -3589,3 +3589,297 @@ sessões poderiam observar ausência simultaneamente. O índice UNIQUE é a auto
 
 Evidência executada: typecheck aprovado; esse teste real aprovado (5 assertions).
 O caso de uso completo ainda será implementado no próximo incremento desta etapa.
+
+## 25. CreateWallet: da intenção de abertura ao commit
+
+### Problema e papéis das camadas
+
+Um **caso de uso** representa uma intenção completa do usuário: aqui, abrir uma
+carteira. Ele precisa coordenar operações que isoladamente não bastam: criar Wallet,
+registrar a origem do saldo, guardar o lançamento e preparar eventos. Pertence à
+camada de aplicação porque determina quando esses objetos colaboram e qual é a
+fronteira atômica. As regras de dinheiro, crédito e estados continuam no domínio.
+
+Controller recebe HTTP, autentica/adapta a entrada e traduz resultado/erros para HTTP.
+CreateWallet coordena a operação independente de transporte. Repository converte
+objetos em registros e executa persistência. A UOW fornece repositórios da mesma
+transação. Nesta etapa o controller não existe: teste/composição Nest chamam execute
+diretamente. Não adicionamos uma segunda implementação de aritmética ou de ledger.
+
+Exemplo: Ana abre uma carteira com 100.00 BRL antes de apostar 25.00. A abertura deve
+explicar de onde vieram os 100.00. OPENING é uma transação interna, sem jogo externo;
+o ledger CREDIT registra 0.00 → 100.00. Saldo atual é o estado materializado consultado
+rapidamente; ledger é histórico imutável que permite conferir sua evolução. A futura
+BET de 25.00 precisará de outro lançamento 100.00 → 75.00, mas não foi implementada aqui.
+Começar em 0.00 não altera dinheiro e não produz OPENING/ledger/eventos financeiros.
+
+### Contrato e fluxo completo
+
+`src/application/wallet/create-wallet.ts` exporta os tipos readonly CreateWalletInput
+(`playerId: string`, `initialBalance: Readonly<MoneyProps>`) e CreatedWallet (`id`,
+`playerId`, `balance: Readonly<MoneyProps>`, `version: number`). Version é contador;
+amount permanece string. O DTO é congelado também em balance; não expõe métodos ou
+estado mutável de entidades. Money.from valida o contrato externo de duas casas.
+
+```mermaid
+sequenceDiagram
+  participant Caller as Chamador futuro API
+  participant UC as CreateWallet
+  participant UOW as FinancialUnitOfWork
+  participant PG as PostgreSQL
+  Caller->>UC: execute(playerId, initialBalance)
+  UC->>UC: Validar entrada e Money; ler relógio
+  UC->>UOW: run(callback)
+  UOW->>PG: BEGIN READ COMMITTED
+  UOW->>UC: Repositórios com o mesmo EntityManager
+  UC->>UC: Wallet.open + ledger em memória
+  UC->>PG: INSERT Wallet
+  opt Saldo positivo
+    UC->>UC: createOpening + markProcessed
+    UC->>PG: INSERT OPENING
+    UC->>PG: INSERT ledger CREDIT versão 1
+    UC->>PG: INSERT WagerTransactionProcessed
+    UC->>PG: INSERT WalletBalanceChanged
+  end
+  UC-->>UOW: Snapshot da resposta
+  UOW->>PG: COMMIT e constraints diferíveis
+  PG-->>UOW: Confirmação ou erro
+  UOW-->>Caller: DTO somente após commit; rejeição se falhar
+```
+
+Os cinco INSERTs da abertura positiva compartilham uma transação: o teste consulta
+xmin das quatro tabelas e encontra um único identificador de transação PostgreSQL.
+As FKs exigem Wallet antes de OPENING e OPENING antes de ledger. A factory Wallet.open
+cria o lançamento em memória antes das escritas; sua persistência ocorre depois da
+transação financeira. Não chamamos credit novamente: isso criaria outro movimento.
+
+Evento criado em memória não foi publicado. Outbox armazena a intenção de publicação
+antes do commit, sem torná-la visível a outras sessões antes de confirmar. Publicar
+SQS dentro do callback permitiria enviar um fato que depois seria desfeito no banco.
+Um publisher futuro lerá registros confirmados; suas falhas/reentregas ainda precisam
+de tratamento próprio. Não há Inbox: não recebemos mensagem de broker nesta operação.
+
+### Catálogo do código de produção
+
+**CreateWallet.constructor(unit, ids, clock)**, em `src/application/wallet/create-wallet.ts`.
+Parâmetros: FinancialUnitOfWork, IdGenerator e Clock. Retorna nova instância; armazena
+somente serviços, sem I/O, entidades ou cache por jogador. Chamadores: useFactory de
+WalletApplicationModule e helper creator dos testes. Dependências são portas; não
+depende de Nest/MikroORM. Não valida serviços fornecidos por código confiável; erros
+desses serviços serão propagados durante execute. Exemplo: real UOW + UUID + SystemClock.
+
+**CreateWallet.execute(input: CreateWalletInput): Promise<CreatedWallet>** no mesmo arquivo.
+Usado pelo futuro adaptador HTTP e diretamente nos testes. Fluxo passo a passo:
+
+1. Recusa entrada não objeto/array e playerId vazio, não string, com espaços/controles.
+   Copia playerId e cria Money imutável, evitando conservar o objeto de entrada.
+2. Compara Money com 999999999999999999.99 na mesma moeda. Esse é limite de admissão
+   para o schema atual, não mudança no Money; o banco ainda verifica sua própria faixa.
+3. Consulta Clock.now uma vez. Entra em unit.run, que inicia transação real.
+4. Gera walletId. Se positivo, gera transactionId e ledgerEntryId. Wallet.open real
+   valida IDs/data e devolve Wallet versão 1 e lançamento; zero devolve lançamento null.
+5. Persiste Wallet. Para saldo positivo, calcula hash e chama createOpening real;
+   marca PROCESSED com a data defensiva de Wallet. Persiste OPENING e ledger versão 1.
+6. Gera um eventId por evento. Factories reais capturam snapshots coerentes.
+   OutboxMessage.enqueue inicia attempts=0, sem nextAttemptAt/publishedAt; dois INSERTs.
+7. Retorna DTO congelado ao callback. run só resolve após commit; execute adota essa
+   Promise, portanto um erro no commit rejeita também o resultado público.
+
+Erros: TypeError para entrada/playerId; MoneyError INVALID_AMOUNT/UNSUPPORTED_CURRENCY;
+RangeError para teto; erros de Wallet/Wager/Event para dependências inválidas;
+WalletAlreadyExistsError para duplicação esperada; demais erros SQL/infra preservados.
+Nenhum catch transforma falha em sucesso; não há retry interno. Nova chamada constrói
+novos objetos/IDs. Exemplo real de teste: execute({playerId:'player',initialBalance:
+{amount:'000100.00',currency:'BRL'}}) devolveu case-1/player/100.00 BRL/version 1.
+
+**Callback de unit.run(repos: FinancialRepositories): Promise<CreatedWallet>** dentro
+de execute: dono temporário das entidades; utiliza exclusivamente os cinco adaptadores
+fornecidos (Inbox não é chamada). Todos os awaits de persistência são sequenciais.
+Retorna snapshot ou rejeita; fechamento/rollback/commit pertencem à UOW existente.
+Não escapa repositório nem entidade para armazenamento fora do callback.
+
+**openingPayloadHash(wallet: Wallet, transactionId: string, ledgerEntryId: string): string**
+no mesmo arquivo, helper privado usado só por execute. Constrói objeto com ordem fixa:
+version, kind, providerId, transactionId, externalTransactionId, idempotencyKey,
+walletId, playerId, ledgerEntryId, roundId, gameId, money, createdAt. Serializa JSON
+UTF-8 sem espaços; Money.toJSON normaliza quantia, Date.toISOString normaliza UTC.
+createHash('sha256').update(...).digest('hex') retorna 64 caracteres. Dependência
+node:crypto testada sob Bun; erros de serialização/crypto propagam e abortam UOW.
+Não é canonicalizador genérico nem autenticação; hash não substitui chave UNIQUE.
+No fixture case-1/case-2/case-3, player, 100.00 BRL, 15:00:00.123Z de 23/10/2026, o hash
+é `f6deebec8b4668f02abeaca73d6b65dac83b9508d286246231aea484c583b298`.
+Foi conferido independentemente com hashlib/json Python e fixado no teste.
+
+**IdGenerator.next(): string e Clock.now(): Date**, em `src/application/ports/runtime.ts`:
+contratos sem implementação, parâmetros ou I/O próprio. CreateWallet é o consumidor;
+testes e runtime fornecem implementações. Injetar serviços em vez de chamar APIs
+globais dentro de entidades permite IDs/datas previsíveis sem alterar o domínio.
+
+**UuidGenerator.next(): string**, em `src/infrastructure/application/runtime.ts`:
+delegação a node:crypto.randomUUID, sem parâmetros; devolve UUID v4. Construtor implícito
+sem parâmetros/estado; criado pela composição Nest. Falhas de crypto propagam; colisão,
+embora improvável, é rejeitada por PK, não tratada como conflito de jogador. UUID não
+é uma sequência ordenada. Exemplo de formato: 8-4-4-4-12 dígitos hexadecimais.
+
+**SystemClock.now(): Date**, no mesmo arquivo: retorna new Date a cada chamada; sem
+parâmetros/estado e com construtor implícito vazio. Chamado por execute via Clock;
+representa instante da operação, não comprova sincronização entre máquinas. A factory
+de Wallet valida a data e armazena timestamp defensivo. Teste Nest verifica que a data
+gravada está entre instantes imediatamente anterior/posterior à chamada.
+
+**WalletApplicationModule e useFactory(unit: FinancialUnitOfWork): CreateWallet**, em
+`src/infrastructure/application/wallet-application.module.ts`: metadados Nest importam
+PersistenceModule, injetam FINANCIAL_UNIT_OF_WORK, constroem adapters UUID/clock e
+exportam o provider CreateWallet. Módulo usa construtor implícito sem lógica. Factory
+retorna instância sem abrir conexão adicional, executar caso de uso ou aplicar migration.
+Nest chama a factory; configuração/startup do PersistenceModule pode falhar como antes.
+Alternativa seria decorar CreateWallet com @Injectable/@Inject; composição externa
+mantém o caso de uso utilizável sem framework. AppModule em `src/app.module.ts` passa
+a importar esse módulo; mantém somente o HealthController. Nenhum novo endpoint.
+
+### Metadados, conflitos e rollback
+
+Foi aprovada a reutilização de WagerTransaction para OPENING com namespace interno,
+em vez de tabela nova. providerId=internal:wallet-opening, roundId/gameId=wallet-opening,
+externalTransactionId=idempotencyKey=OPENING.id. Futura admissão de provedores deve
+reservar esse namespace. correlationId=Wallet.id agrupa os dois eventos;
+causationId=OPENING.id identifica a causa. Todos usam o mesmo instante. Snapshot de
+WagerTransactionProcessed tem aggregateId da transação; WalletBalanceChanged, da Wallet.
+
+Duplicação de playerId/moeda é conflito de negócio, não replay. SELECT antes de INSERT
+não resolveria a corrida: duas sessões poderiam consultar ausência. UNIQUE permite
+que a segunda inserção espere o resultado da primeira. Se esta confirma, a segunda
+falha; se desfaz, a segunda pode inserir. Verificação e espera fazem parte do mecanismo
+do índice do PostgreSQL, conforme [documentação oficial](https://www.postgresql.org/docs/17/index-unique-checks.html).
+Carteiras de jogadores/moedas diferentes não disputam essa chave.
+
+Constraints diferíveis são verificadas no commit, depois de o callback ter terminado.
+Qualquer inconsistência faz a confirmação falhar; não é suficiente retornar do callback.
+Esse comportamento está descrito em [SET CONSTRAINTS](https://www.postgresql.org/docs/17/sql-set-constraints.html).
+O rollback do SQL não volta os campos privados de objetos JavaScript. A sessão existente
+recusa salvar objetos pertencentes à transação anterior; execute nunca os guarda.
+O teste conserva deliberadamente um objeto alterado para provar essa proteção.
+
+### Catálogo dos testes e helpers
+
+Todos os testes abaixo retornam Promise<void> via callback async do Bun, recebem
+apenas parâmetros indicados por test.each, e falham por assertion/erro/timeout. Usam
+withMessagingDatabase: cria banco dwp_test_*, aplica quatro migrations, usa papel
+wager_app para negócio, fecha conexões e remove esse banco no finally. Nenhuma tabela
+financeira é criada no banco principal. Testes de sucesso usam domínio/repos reais.
+
+Em `infra/test/wallet-creation-support.ts`:
+
+| Helper | Parâmetros/retorno, fluxo, dependências, chamadores e erros |
+|---|---|
+| sequenceIds | prefix:string='case' → IdGenerator. Closure next():string incrementa contador e retorna prefix-N; sem I/O. creator e testes usam IDs previsíveis; não é gerador de produção. |
+| creator | unit:FinancialUnitOfWork, prefix:string='case' → CreateWallet. Usa sequenceIds e Clock.now():Date que retorna nova Date(openingTime). Chamado pelas três suites novas; delega erros ao caso de uso. |
+| expectCounts | sql:SQL, wallets/transactions/ledger/outbox:string → Promise<void>. SELECT de cinco subconsultas count, compara exatamente com esperado e Inbox=0. Usado após commit/rollback; assertion ou erro SQL falha. Não converte dinheiro/contagem para float. |
+
+Constantes fundedInput e openingTime são fixtures compartilhadas somente para leitura:
+player/100.00 BRL e 2026-10-23T15:00:00.123Z. O helper não substitui operações de negócio.
+
+Em `infra/test/wallet-creation-functional.test.ts`:
+
+| Teste (nome iniciado por CreateWallet, salvo Nest) | Passos, resultado e motivo |
+|---|---|
+| zero persists only the wallet and returns an immutable plain response | execute0.00; DTO plain/frozen nas duas camadas, versão1; SQL confirma1Wallet e0em todas as demais tabelas. |
+| positive commits linked OPENING CREDIT and two pending events with exact values | execute000100.00; consulta as quatro tabelas, IDs, moeda, quantias, datas, hash fixo, status/refs e versão; xmin único prova mesma transação; eventos pendentes corretos. Callbacks map sobre eventos extraem IDs; for percorre ambos sem mutação. |
+| preserves supported amount %s (2 casos) | Parâmetro amount:string em999999999999999999.99 e0.01; confere resposta, saldo e ledger textuais exatos, e contagem1/1/1/2. |
+| rejects %s without partial records (10 casos) | invalidCases é tabela label:string,input:unknown,errorCode:string. Casos1.005, number100, JPY,-1.00, acima do teto, player vazio/espaço/controle/número e inputnull. Cast representa transporte não tipado; exige classe/código esperado e cinco tabelas vazias. |
+| separates currencies and rejects a duplicate without changing the first opening | Uma instância abre BRL e USD para mesmo player; terceira chamada BRL conflita; saldo original e contagens2/2/2/4 preservados. |
+| Nest composes CreateWallet with restricted PostgreSQL UUIDs and system clock without exposing an endpoint | Substitui temporariamente DATABASE_URL pelo descartável; inicia Nest, resolve provider e executa abertura. Confere UUIDv4, data real, contagens e404em POST /wallets. Finally fecha Nest/restaura env mesmo em erro. |
+
+Em `infra/test/wallet-creation-rollback.test.ts`:
+
+| Teste | Injeção de falha, resultado e callbacks |
+|---|---|
+| CreateWallet rolls back a real wallet INSERT when the OPENING factory throws | Wrapper run(work) delega à UOW real; wrapper wallets.insert(wallet):Promise<void> grava de verdade e marca inserted; os demais métodos delegam intactos. spyOn/createOpening lança uma exceção apenas nesta tentativa, restaurada no finally. A exceção é artificial; INSERT/rollback/SQL são reais. Exige inserted=true e banco vazio; nova chamada com factory real confirma. |
+| CreateWallet rolls back a PostgreSQL write failure in %s (3 casos) | table:literal wager_transactions/wallet_ledger_entries/outbox_messages. Owner instala fail_creation_write():trigger temporária que lança P0001; na Outbox dispara apenas no segundo evento case-5. Execute rejeita e tudo volta a0; remove função/trigger e repete com novos IDs, obtendo1/1/1/2. SQL unsafe usa só identificadores literais do teste, nunca entrada externa. |
+| CreateWallet propagates Outbox identity collisions rather than wallet conflicts | Gerador next():string retira IDs fixos de array, repetindo os dois eventIds. PK real da Outbox rejeita segundo INSERT; exige nome original da constraint e rollback integral. Clock.now retorna data fixa. |
+| CreateWallet rejects a deferred commit failure and discards mutated objects before retry | Wrapper run executa callback real até o DTO; carrega Wallet sob lock, usa credit1.00 e save reais, omitindo propositalmente o ledger desse movimento extra. Callback termina; constraint financeira existente falha23514no COMMIT. Callback then de sucesso não executa, banco vazio. Objeto retido continua101.00 mas nova UOW recusa reutilizá-lo. Desliga injeção; mesma instância CreateWallet retorna nova Wallet100.00/version1/IDcase-6. |
+
+fail_creation_write é PL/pgSQL apenas do teste, sem parâmetros explícitos, contexto
+NEW/TG_TABLE_NAME implícito de trigger e retorno declarado trigger; sempre lança, não
+retorna linha. Chamador é BEFORE INSERT PostgreSQL; não é migration de produção.
+No cenário de commit não criamos trigger nova: testamos as constraints já existentes.
+
+Em `infra/test/wallet-creation-concurrency.test.ts`:
+
+- `gate(): {ready:Promise<void>,open:()=>void}` cria barreira. Executor da Promise guarda
+  resolve; open libera a espera. Dois gates separam fim das escritas e autorização de
+  commit. Não possui timer nem consulta; usado pelo teste parametrizado.
+- `bounded<T>(operation:Promise<T>):Promise<T>` disputa operação com watchdog5s; rejeita
+  em timeout, limpa timer no finally. Callbacks do timer só rejeitam; não contam como
+  evidência de lock. Usado para evitar que regressão fique aguardando indefinidamente.
+- `observeWalletWait(sql:SQL):Promise<void>` consulta pg_stat_activity e pg_blocking_pids,
+  filtrando banco atual/INSERTwallets/Lock e bloqueador distinto do PID aguardando.
+  Amostra a cada10ms por até4s, lança se não observar. O sleep limita polling; o
+  resultado do servidor comprova sessões independentes, não uma suposição por tempo.
+- `concurrent CreateWallet waits for %s while another wallet advances` (2 casos,
+  ending:'commit'|'rollback'): cria segundo ORM/pool e segunda UOW; wrapper paused.run
+  mantém A após escritas e antes do commit; observer vê0linhas e retorno não entregue.
+  B tenta mesma chave e é observada esperando. C abre other-player enquanto A/B
+  disputam. Libera A: no commit B conflita; no rollback B confirma. Final tem2Wallets,
+  2OPENINGs,2ledgers,4eventos (incluindo C) e só uma Wallet para player/BRL. Callbacks
+  then capturam sucesso/erro como resultado para evitar rejeição não tratada; finally
+  libera barreira, aguarda allSettled e fecha ORM. Não há lock global ou retry invisível.
+
+O teste de conflito específico e seu helper make estão catalogados na seção24.
+Não criamos testes espelhando cada linha: assertions verificam contratos observáveis,
+estado SQL, momento de commit e erros reais nas fronteiras relevantes.
+
+### Evidência executada e limites — 23/10/2026
+
+Ambiente: Bun 1.4.3, PostgreSQL 17 em container local; credenciais de aplicação
+wager_app para operações financeiras. Os comandos foram executados na raiz; Bun
+local foi disponibilizado com `export PATH="$PWD/.tools/node_modules/.bin:$PATH"`.
+Para check, DATABASE_URL apontou para a conexão local documentada em .env.example.
+
+| Comando | Resultado observado |
+|---|---|
+| `bun run check` | Typecheck OK; 437 testes aprovados; build TypeScript OK |
+| `bun run test:wallet-creation` | 25 testes aprovados, 0 falhas, 116 assertions |
+| `bun run test:financial` | 34 aprovados |
+| `bun run test:persistence` | 15 aprovados |
+| `bun run test:messaging` | 14 aprovados |
+| `bun run test:orm` | 2 aprovados |
+| `bun run test:migrations` | 2 aprovados |
+| `bun run test:infra` | 2 PostgreSQL + 4 SQS aprovados, incluindo reinício/recriação |
+
+Total: **535 testes distintos**, 25 novos sobre os 510 anteriores. Não somamos
+reexecuções da mesma suíte. Testes de infraestrutura foram executados depois dos
+financeiros para não interromper suas conexões durante restart dos containers.
+
+Consultas finais executadas:
+
+```bash
+docker compose exec -T postgres psql -U wager_admin -d wagering \
+  -c "SELECT tablename FROM pg_tables WHERE schemaname='public';" \
+  -c "SELECT datname FROM pg_database WHERE datname LIKE 'dwp_test_%';"
+```
+
+Ambas retornaram `(0 rows)`: principal sem tabelas/migrations financeiras e nenhum
+banco descartável remanescente. `docker compose ps` mostrou PostgreSQL e LocalStack
+healthy. Uma primeira consulta manual usou o nome incorreto wager_owner e falhou por
+papel inexistente; corrigida para wager_admin conforme compose.yaml, sem alterar roles.
+Nenhum teste automatizado falhou nesta implementação.
+
+Evidência financeira real: abertura de 100.00 resultou em uma Wallet versão 1, uma
+OPENING PROCESSED, um CREDIT 0.00 → 100.00 e dois eventos pendentes. Cada cenário de falha
+deixou as cinco tabelas vazias; depois de retirar a falha, nova tentativa confirmou
+com objetos novos. Abertura concorrente teve um vencedor e um conflito após commit;
+após rollback da primeira, a segunda confirmou. Outro jogador concluiu antes de
+liberar a disputa. A restrição de concorrência não depende de FIFO nem memória local.
+
+O enunciado oficial, domínio e migrations permaneceram intactos; README foi atualizado
+somente na seção da implementação. Não há controller, consumidor, publisher, apostas,
+replay HTTP, autenticação ou migrations no principal. SQS foi testado como regressão
+da infraestrutura existente, não como publicação de eventos desta nova funcionalidade.
+O namespace interno ainda precisa ser protegido na futura admissão de provedores.
+Falha de conexão após o servidor confirmar um commit pode deixar resultado incerto
+para o cliente; não prometemos replay HTTP ou recuperação dessa janela nesta etapa.
+
+Próxima etapa recomendada: adaptador HTTP de criação de carteira com contrato/erros
+e autenticação do README, mediante autorização específica. Desenvolvimento encerrado
+no caso de uso de aplicação e seus testes.

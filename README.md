@@ -763,7 +763,9 @@ diferíveis testadas por SQL em bancos descartáveis. Não foi aplicado no banco
 principal. Mappers, repositórios e unidade transacional com lock por wallet estão
 implementados. Eventos v1, Inbox/Outbox e sua integração na mesma transação foram
 adicionados em uma quarta migration, também validada só em bancos descartáveis.
-Publishers, consumers e casos de uso financeiros públicos permanecem pendentes. Para estudar
+CreateWallet coordena abertura positiva com OPENING/ledger/dois eventos Outbox na mesma
+transação; abertura zero cria só a carteira. Está disponível por injeção, ainda sem
+controller. Publishers, consumers e endpoints financeiros permanecem pendentes. Para estudar
 só Money: `bun test ./test/money.test.ts`; lançamentos:
 `bun test ./test/wallet-ledger-entry.test.ts`; Wallet: `bun test ./test/wallet.test.ts`;
 WagerTransaction: `bun test ./test/wager-transaction.test.ts`.
@@ -789,6 +791,7 @@ bun run test:migrations
 bun run test:financial
 bun run test:persistence
 bun run test:messaging
+bun run test:wallet-creation
 ```
 
 Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute

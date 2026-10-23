@@ -13,20 +13,20 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após schema financeiro
+## Comparação com o README — atualização após CreateWallet
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
-| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest e migrations oficiais up/down validados | Mapeamento financeiro e casos de uso futuros |
-| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Domínio implementado; schema financeiro versionado e testado em bancos descartáveis | Casos de uso, mapeamento e atomicidade com Inbox/Outbox |
+| PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest, migrations e mappers/repositórios validados | Operação nos ambientes alvo; principal ainda sem migrations financeiras |
+| Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Domínio e persistência implementados; CreateWallet com OPENING/ledger/Outbox atômicos | Demais casos de uso financeiros |
 | BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Kinds, lifecycle, referências e direções locais implementados | Casos de uso e processamento com Inbox/Outbox |
-| Concorrência por wallet (§8) | Ausente | Pendente | Corridas em ≥3 processos |
+| Concorrência por wallet (§8) | Ausente | Locks de repositório e disputa de criação validados em sessões independentes | Corridas de apostas em ≥3 processos |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
-| Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Pendente | Crash após commit antes de ACK |
-| Outbox e eventos (§11) | Ausente | Pendente | Dois publishers, crash e redelivery |
+| Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Modelo/schema/repositório Inbox e SQS local testados; sem consumer | Consumer, crash após commit antes de ACK, shutdown |
+| Outbox e eventos (§11) | Ausente | Eventos v1 e Outbox persistente; abertura grava dois eventos na mesma transação | Dois publishers, crash e redelivery |
 | Observabilidade (§12) | Ausente | Logs de startup JSON e liveness | Contexto completo, métricas e readiness |
-| Integração/distribuição (§13) | Ausente | HTTP e infraestrutura reais; 2 testes PG e 4 SQS | Atomicidade financeira e ≥3 instâncias |
+| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais, rollback/commit/concorrência de persistência e abertura validados | Fluxos de apostas/HTTP/SQS e ≥3 instâncias |
 | Documentação (§14) | Enunciado | Plano, arquitetura e guia | Atualização a cada funcionalidade |
 | Autenticação (§2) | Ausente | Decisão proposta, sem endpoints financeiros | Porta de identidade explícita e desenho OIDC |
 
@@ -45,9 +45,9 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 6 | `feat: implement Wallet aggregate with balance invariants` | Concluída: abertura com ledger, debit/credit, versão/datas e rejeições sem efeitos; 81 testes específicos |
 | 7 | `feat: implement wager transaction lifecycle and domain rules` | Concluída: factories, estados terminais, referências, direções e códigos; 151 testes específicos |
 | 8 | `feat: enforce financial database constraints` | Concluída em 3 commits: migrations Wallet/Transaction/Ledger, constraints, permissões e integridade diferível; 34 testes SQL. Mapeamento/repositórios financeiros ficam para próxima autorização |
-| 9 | `feat: define versioned integration events` | Classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
-| 10 | `feat: persist transactional outbox records` | Modelo/repositório de Outbox e gravação dentro da mesma transação SQL; sem publicação ainda |
-| 11 | `feat: open and query wallets atomically` | Abertura + OPENING/ledger para saldo positivo, version=1, consultas e porta de identidade |
+| 9 | `feat: define versioned integration events` | Concluída: classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
+| 10 | `feat: persist transactional outbox records` | Concluída: modelos/repositórios Inbox/Outbox na mesma transação; publicação pendente |
+| 11 | `feat: open and query wallets atomically` | Abertura concluída: OPENING/ledger/Outbox positivos, versão1; consultas públicas, controller e porta de identidade pendentes |
 | 12 | `feat: persist wager idempotency and original results` | Unicidade key e identidade externa, JSON canônico e snapshot; colisões e restart |
 | 13 | `feat: process BET with wallet-level locking` | Débito + ledger + status + outbox atômicos; 50 replays e 2 apostas de 80 sobre saldo 100 |
 | 14 | `feat: process WIN and LOSS transactions` | Crédito e resultado sem movimento; eventos e version corretos |
@@ -93,7 +93,7 @@ auditável; PostgreSQL/SQS completamente substituídos por mocks.
 
 Em 21/10/2026, o usuário aprovou **MikroORM + LocalStack + lock pessimista por
 carteira no PostgreSQL**. Essas escolhas orientam as etapas 2, 3 e 13;
-a infraestrutura das etapas 2 e 3 foi validada; locks financeiros permanecem pendentes. A decisão e as alternativas
+a infraestrutura das etapas 2 e 3 e os locks de repositório foram validados; aplicação aos casos de uso de apostas permanece pendente. A decisão e as alternativas
 estão na ADR-003 de [ARCHITECTURE](../ARCHITECTURE.md).
 
 Money exige exatamente duas casas e admite zero; entradas negativas são rejeitadas,
@@ -213,3 +213,20 @@ recomendada: caso de uso transacional de abertura de carteira (incluindo OPENING
 ledger e dois eventos Outbox), após autorização; depois admissão/processamento e
 idempotência compartilhados por HTTP/SQS. Publishers/consumers operacionais exigem
 suas próprias etapas e decisões, e não foram iniciados automaticamente.
+
+Etapa CreateWallet autorizada: tratamento específico de conflito de unicidade
+concluído em c73ff56. Caso de uso coordena Wallet.open/createOpening, ledger e dois
+eventos na mesma UOW, com DTO entregue após commit; saldo zero não movimenta ledger.
+Metadados internos de OPENING aprovados (ADR-020). Sem controller, Inbox, publicação,
+processamento de apostas ou mudanças no schema. Testes reais isolados cobrem abertura,
+limites, falhas e concorrência; fechamento da evidência consta na seção25 do guia.
+
+Próxima etapa recomendada, somente após nova autorização: adaptador HTTP de criação
+de carteira, tratamento dos erros/contrato e autenticação exigida pelo README. Decidir
+previamente como atender a autenticação na exposição do endpoint e como preparar o
+banco alvo, sem aplicar migrations ao principal automaticamente. Processamento de
+apostas, publisher/consumer, replay HTTP e referências permanecem em etapas próprias.
+
+Etapa CreateWallet concluída: **535 testes distintos aprovados**, typecheck/build OK.
+Banco principal sem tabelas financeiras e nenhum banco dwp_test_* remanescente.
+Nenhum push. As etapas seguintes continuam dependendo de nova autorização.
