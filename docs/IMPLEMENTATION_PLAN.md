@@ -135,3 +135,9 @@ com decisão prévia sobre mapeamento, limites NUMERIC/payload, escopos de unici
 proteção de ledger/terminais e caminho de escrita atômico. Só implementar após nova
 autorização. A política de retries/TTL e o snapshot de replay também permanecem
 pendentes em suas etapas. Encerramos o desenvolvimento nesta funcionalidade.
+
+Etapa 8 autorizada em 23/10/2026, em andamento: usuário aprovou limite monetário
+(20,2) com NUMERIC/CHECK sem arredondar, idempotência por provedor e integridade
+por triggers diferíveis com versão no ledger. Primeiro incremento: Wallet/DOMAIN,
+constraints e privilégios. WagerTransaction e ledger/integridade virão nos próximos
+commits desta etapa; ainda não são garantias entregues neste incremento.

@@ -1,7 +1,9 @@
 # Migrations de produção
 
-Nenhuma migration de schema foi criada nesta etapa. A demonstração é gerada
-em diretório temporário e executada apenas em banco `dwp_test_<UUID>`.
+Migration20261023000001 cria wallets e o domínio SQL financial_amount.
+As migrations financeiras versionadas são testadas em bancos `dwp_test_<UUID>`.
+A demonstração antiga continua isolada em diretório temporário.
+Não aplicamos as migrations no banco principal automaticamente nesta etapa.
 
 Use `bun run migration:create --name NomeDescritivo` para gerar uma migration
 vazia com a CLI oficial. Implemente e revise `up` e `down`, teste no banco

@@ -545,3 +545,36 @@ cegamente. Falha transitória permanece recuperável. Não implementado nesta et
 **Evidência local:** suíte dedicada ao lifecycle, referências e encapsulamento, com
 cenário que aceita duas reversões em objetos independentes para mostrar o limite da
 entidade. Resultados e comandos reais estão na seção 15 do LEARNING_GUIDE.
+
+## ADR-012 — Schema financeiro: decisões aprovadas em 23/10/2026
+
+- Capacidade monetária equivalente a NUMERIC(20,2): 18 dígitos inteiros e dois
+  decimais, máximo 999999999999999999.99. Colunas usam o domínio SQL
+  financial_amount sobre NUMERIC **sem typmod**, CHECK de faixa não negativa e
+  scale <= 2. Isso rejeita 1.005 em vez de arredondar para 1.01. O domínio SQL é
+  apenas um tipo validado reutilizado nas colunas; não é a camada de domínio DDD.
+  Alternativa recusada: NUMERIC(20,2) literal com validação obrigatória anterior em
+  funções de escrita. Money mantém precisão aritmética maior; armazenamento tem teto.
+- Idempotência aprovada por provedor: UNIQUE(provider_id,idempotency_key), além
+  de UNIQUE(provider_id,external_transaction_id), sem recalcular a chave recebida.
+- Correspondência de saldo e ledger: constraint triggers diferíveis e wallet_version
+  como metadado persistido do lançamento. Alternativa considerada: escrita apenas
+  por funções SQL. Os detalhes e evidências serão acrescentados com o ledger.
+- IDs continuam text, compatíveis com o domínio; não impomos UUID nem inventamos
+  identidades externas. Índices B-tree têm limites físicos de tamanho de entrada;
+  limites de payload do futuro contrato deverão considerar isso.
+- Dinheiro entra/sai como string; nada de parseFloat ou DecimalType em modo number.
+  SQL admite escala 0/1 sem perda; futura leitura normalizará para as duas casas de
+  Money. Não consegue recuperar dígitos que o cliente já arredondou antes de enviar.
+- Version usa bigint limitado ao inteiro seguro positivo do domínio; moeda BRL/USD/EUR;
+  timestamps timestamptz(3), finitos, compatíveis com Date em milissegundos.
+- Migrations SQL explícitas e oficiais, sem auto-sync. Cada etapa usa apenas bancos
+  descartáveis. DOWN remove dados e não é um procedimento de recuperação financeira.
+
+Primeiro incremento: wallets e financial_amount entregues. PK(id),
+UNIQUE(player_id,currency), UNIQUE(id,player_id,currency) para futura FK composta;
+CHECKs e NOT NULL protegem representação. wager_app pode SELECT/INSERT e UPDATE
+somente balance/version/updated_at; não DELETE/TRUNCATE/DDL/alteração de identidade.
+Ainda não protege saldo contra mudança sem ledger até a migration de integridade.
+Proprietário/migrador continua responsável por DDL; superuser não é fronteira de
+segurança contra adulteração do schema. O papel da aplicação não é administrador.

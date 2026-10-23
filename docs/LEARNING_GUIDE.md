@@ -2450,3 +2450,106 @@ o README mudou somente na seção adicional de implementação.
 Próxima proposta: desenhar persistência e constraints financeiras, fechar limites
 de armazenamento e plano de escrita atômico antes das migrations. Não iniciamos
 essa etapa, endpoints ou processamento. O desenvolvimento para aqui.
+
+## 16. Schema financeiro PostgreSQL — primeira parte: Wallet
+
+Em 23/10/2026 partimos de main limpa em 97c3fad. README, modelos e configuração real
+foram inspecionados; não havia tabelas públicas no banco wagering. O usuário aprovou
+NUMERIC com CHECKs, limite equivalente a (20,2), key única por provedor e triggers
+diferíveis com wallet_version no ledger. As duas últimas escolhas serão implementadas
+nas próximas partes desta mesma etapa autorizada.
+
+### Precisão exata e limites de armazenamento
+
+Em NUMERIC(p,2), p conta todos os dígitos e 2 é a escala fracionária; p=20 permite
+18 dígitos inteiros. O maior valor não negativo é 999999999999999999.99. Esse teto
+é muito superior aos exemplos do desafio, mas finito e explícito. Money pode calcular
+valores maiores; persistir algo fora do limite deve falhar, nunca truncar.
+
+A consulta real `SELECT '1.005'::numeric(20,2), '1.005'::numeric` retornou 1.01 e
+1.005. Uma coluna com typmod (20,2) já teria arredondado antes de executar um CHECK
+sobre seu valor. Por isso financial_amount é um **DOMAIN SQL sobre numeric sem
+typmod**, com range 0..999999999999999999.99 e scale <= 2. Não é um domínio DDD nem
+tabela extra: é o mesmo tipo numérico com validação reutilizada. NaN e infinidades
+falham no limite superior/inferior. NULL é tratado pelo NOT NULL de cada coluna.
+Escala 0/1 é exata e aceita no banco; o futuro mapper formatará em duas casas antes
+de Money.from. Escala 3, inclusive 1.000, é recusada. Se o próprio cliente executar
+um cast que já arredondou, o banco não pode reconstruir o valor original perdido.
+
+PostgreSQL armazena NUMERIC em representação decimal de precisão variável, sem
+usar ponto flutuante para os centavos. A documentação oficial descreve arredondamento
+e armazenamento: https://www.postgresql.org/docs/17/datatype-numeric.html.
+Inspecionamos DecimalType instalado no MikroORM 7: modo number converte com `+value`,
+modo string preserva texto. Consulta real via EntityManager retornou o máximo como
+string, sob wager_app. Não configuramos conversão para number. Futuras entidades de
+persistência serão separadas das classes de domínio; migrations SQL não exigem
+antecipar repositórios/EntitySchemas sem caso de uso.
+
+### Chaves, checks e permissões
+
+PRIMARY KEY identifica uma linha, proíbe nulo/duplicata e cria índice único.
+UNIQUE(player_id,currency) impede duas wallets do mesmo jogador na mesma moeda;
+BRL e USD do mesmo jogador são carteiras diferentes. A UNIQUE composta adicional
+(id,player_id,currency) servirá à FOREIGN KEY das transações, protegendo o vínculo
+com o jogador/moeda corretos. FOREIGN KEY assegura que a chave referenciada exista;
+não significa copiar todos os dados nem executar regras de processamento.
+
+CHECK valida uma expressão da linha; não deve consultar outras tabelas. NOT NULL
+é separado porque um CHECK que resulta NULL não rejeita a linha. Um índice acelera
+buscas e custa espaço/manutenção na escrita. Os índices de PK/UNIQUE já atendem essas
+consultas; não criamos cópias redundantes. Checks não criam índices automaticamente.
+
+Exemplos executados no teste, após criar os campos obrigatórios da wallet:
+
+```sql
+UPDATE wallets SET balance = '-0.01'; -- 23514: faixa
+UPDATE wallets SET balance = '1.005'; -- 23514: escala, não vira 1.01
+UPDATE wallets SET version = 0;      -- 23514: versão positiva
+DELETE FROM wallets;                -- 42501 para wager_app
+```
+
+Schema e dados têm permissões distintas. wager_app recebe SELECT, INSERT e UPDATE
+apenas nas três colunas mutáveis. Não pode mudar dono/moeda/ID, apagar wallet,
+TRUNCATE ou alterar tabelas/triggers. O proprietário de migrations continua capaz de
+administrar o schema. Não prometemos resistência contra um administrador que
+explicitamente remove as proteções.
+
+### Cada função/migration/helper e seus chamadores
+
+| Nome e arquivo | Parâmetros e retorno | Fluxo, validações, erros, dependências e razão |
+|---|---|---|
+| Migration20261023000001.up — migrations/Migration20261023000001.ts | nenhum → Promise<void> | Migrator oficial chama; addSql agenda criação do DOMAIN, wallets, PK/UNIQUE/CHECKs e grants; falha DDL aborta migration transacional; não modifica tabelas preexistentes |
+| Migration20261023000001.down — mesmo arquivo | nenhum → Promise<void> | Migrator chama em reversão; remove wallets antes do DOMAIN, respeitando dependência; perde dados e falha se dependências futuras não tiverem sido revertidas; sem CASCADE |
+| withFinancialDatabase — infra/test/financial-schema-support.ts | to: string, run: (FinancialDatabase) => Promise<void> → Promise<void> | usa withDisposableDatabase; inicia MikroORM de migrations, clientes SQL app/owner, aplica até a migration solicitada e chama callback; finally fecha conexões, helper externo apaga só banco dwp_test; erros propagam; evita tocar wagering |
+| expectSqlState — mesmo arquivo | run: () => Promise<unknown>, sqlstate: string → Promise<void> | executa SQL, captura erro e exige Error + errno exato; asserção falha se SQL foi aceito ou erro errado; usado nos cenários negativos, não simula PostgreSQL |
+| insertWallet — mesmo arquivo | sql: SQL, id: string=wallet-1, balance: string=0.00 → Promise<void> | INSERT parametrizado com player derivado, BRL, version1 e timestamps fixos; propaga erro PostgreSQL; fixture usada pelos testes; depois da integridade completa, saldo positivo exige abertura/ledger no mesmo commit |
+
+FinancialDatabase é o contexto de teste (app, owner, orm e applicationUrl); não é
+abstração de domínio/repositório. `orm.migrator` é a API real instalada no MikroORM 7;
+getMigrator de exemplos de versões anteriores não existe nesta versão. O typecheck
+identificou a diferença e usamos a API atual sem flexibilizar TypeScript strict.
+
+Todos os testes seguintes estão em infra/test/financial-wallet.test.ts. Callbacks
+assíncronos recebem contexto por withFinancialDatabase, retornam Promise<void> ao
+Bun e falham por asserção/erro SQL inesperado. Aplicam somente a primeira migration,
+para testar precisamente sua responsabilidade; a suíte de ledger testará o conjunto.
+
+| Teste | Entrada, lógica e resultado |
+|---|---|
+| wallet schema enforces primary key, player/currency uniqueness and required fields | insere wallet, tenta PK e par duplicados (23505); outra moeda funciona; campos omitidos dão 23502 |
+| wallet rejects negative, overflow, excess scale and nonfinite money through direct SQL | sete valores inválidos parametrizados dão 23514 e não deixam linhas; maior valor válido retorna exatamente igual |
+| wallet validates currency, identifiers, version bounds and finite timestamps | versões zero/negativa/acima MAX_SAFE, moedas e IDs inválidos, infinity e NULL; erros 23514/23502; último inteiro seguro aceito |
+| wallet grants permit only application data operations and prevent DDL, identity updates and deletion | app insere/atualiza campos mutáveis; seis tentativas proibidas dão 42501; protege fronteira de privilégios, não só domínio |
+| MikroORM and PostgreSQL return exact financial decimals as strings compatible with Money | grava Money máximo como string, consulta com ORM/app real, verifica typeof e roundtrip Money.equals; fecha ORM no finally |
+| wallet migration applies once, reverses in a disposable database and reapplies cleanly | confere tabela, segundo up vazio, down até 0 remove tabela/tipo, novo up registra uma migration; somente banco descartável |
+
+A primeira migration ainda permite alteração direta de saldo sem ledger: a terceira
+parte fechará essa lacuna com as três tabelas presentes. Uma migration cria estrutura;
+uma transação financeira futura grava dados relacionados numa unidade BEGIN/COMMIT.
+O fato de a migration ser transacional não torna os futuros casos de uso atômicos
+por si só.
+
+Evidência do primeiro incremento: `bun test ./infra/test/financial-wallet.test.ts`
+passou 6 testes/64 expectativas; `DATABASE_URL=... bun run check` passou os 395
+casos existentes, typecheck e build. O valor máximo foi devolvido como string por
+MikroORM real. Não alteramos Money nem aplicamos a migration no banco principal.

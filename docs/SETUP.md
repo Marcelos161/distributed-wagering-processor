@@ -251,3 +251,10 @@ banco, inspecione o banco de teste identificado antes de qualquer remoção manu
 O diretório migrations deve conter só uma versão (TS) de cada arquivo. O glob
 Migration*.ts/js ignora README. Snapshots/diff automático estão desativados porque
 ainda não existem entidades mapeadas; SQL é escrito e revisado explicitamente.
+
+### Testes do schema financeiro
+
+`bun run test:financial` aplica migrations reais em bancos descartáveis e valida
+constraints/permissões por SQL direto. Não aplica nem reverte schema em wagering.
+Migrations versionadas podem ser consultadas pela CLI existente; aplicar no banco
+principal é uma ação separada. DOWN descarta dados das tabelas removidas.
