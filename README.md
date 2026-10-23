@@ -765,7 +765,9 @@ implementados. Eventos v1, Inbox/Outbox e sua integração na mesma transação 
 adicionados em uma quarta migration, também validada só em bancos descartáveis.
 CreateWallet coordena abertura positiva com OPENING/ledger/dois eventos Outbox na mesma
 transação; abertura zero cria só a carteira. Está disponível por injeção, ainda sem
-controller. Publishers, consumers e endpoints financeiros permanecem pendentes. Para estudar
+controller. ProcessWagerTransaction processa somente BET, com idempotência por provedor,
+locks por identidade/carteira e replay do resultado histórico em uma quinta migration.
+Publishers, consumers e endpoints financeiros permanecem pendentes. Para estudar
 só Money: `bun test ./test/money.test.ts`; lançamentos:
 `bun test ./test/wallet-ledger-entry.test.ts`; Wallet: `bun test ./test/wallet.test.ts`;
 WagerTransaction: `bun test ./test/wager-transaction.test.ts`.
@@ -792,6 +794,7 @@ bun run test:financial
 bun run test:persistence
 bun run test:messaging
 bun run test:wallet-creation
+bun run test:bet
 ```
 
 Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute

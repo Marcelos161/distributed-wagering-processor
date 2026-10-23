@@ -13,20 +13,20 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após CreateWallet
+## Comparação com o README — atualização após BET
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
 | PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest, migrations e mappers/repositórios validados | Operação nos ambientes alvo; principal ainda sem migrations financeiras |
 | Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Domínio e persistência implementados; CreateWallet com OPENING/ledger/Outbox atômicos | Demais casos de uso financeiros |
-| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Kinds, lifecycle, referências e direções locais implementados | Casos de uso e processamento com Inbox/Outbox |
-| Concorrência por wallet (§8) | Ausente | Locks de repositório e disputa de criação validados em sessões independentes | Corridas de apostas em ≥3 processos |
+| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Domínio completo; caso de uso BET com Outbox e rejeição persistida | Casos de uso WIN/LOSS/REFUND/ROLLBACK e entrada Inbox |
+| Concorrência por wallet (§8) | Ausente | BET 80+80/saldo 100 e 50 cópias em 3 processos reais validados, além de locks/criação | Outros kinds e janelas de falha distribuída |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
 | Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Modelo/schema/repositório Inbox e SQS local testados; sem consumer | Consumer, crash após commit antes de ACK, shutdown |
 | Outbox e eventos (§11) | Ausente | Eventos v1 e Outbox persistente; abertura grava dois eventos na mesma transação | Dois publishers, crash e redelivery |
 | Observabilidade (§12) | Ausente | Logs de startup JSON e liveness | Contexto completo, métricas e readiness |
-| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais, rollback/commit/concorrência de persistência e abertura validados | Fluxos de apostas/HTTP/SQS e ≥3 instâncias |
+| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais; BET com replay, rollback e 3 processos Bun | Fluxos HTTP/SQS, kill-process e publishers |
 | Documentação (§14) | Enunciado | Plano, arquitetura e guia | Atualização a cada funcionalidade |
 | Autenticação (§2) | Ausente | Decisão proposta, sem endpoints financeiros | Porta de identidade explícita e desenho OIDC |
 
@@ -48,8 +48,8 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 9 | `feat: define versioned integration events` | Concluída: classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
 | 10 | `feat: persist transactional outbox records` | Concluída: modelos/repositórios Inbox/Outbox na mesma transação; publicação pendente |
 | 11 | `feat: open and query wallets atomically` | Abertura concluída: OPENING/ledger/Outbox positivos, versão1; consultas públicas, controller e porta de identidade pendentes |
-| 12 | `feat: persist wager idempotency and original results` | Unicidade key e identidade externa, JSON canônico e snapshot; colisões e restart |
-| 13 | `feat: process BET with wallet-level locking` | Débito + ledger + status + outbox atômicos; 50 replays e 2 apostas de 80 sobre saldo 100 |
+| 12 | `feat: persist wager idempotency and original results` | Implementado para BET: unicidade por provedor, JSON canônico, snapshot imutável; replay após recriar ORM. Adaptador/replay HTTP pendente |
+| 13 | `feat: process BET with wallet-level locking` | Implementado: débito + ledger + status + Outbox + resultado atômicos; validações concorrentes na seção29 do guia |
 | 14 | `feat: process WIN and LOSS transactions` | Crédito e resultado sem movimento; eventos e version corretos |
 | 15 | `feat: process full REFUND reversals` | Mesma referência completa, uma vez por tipo, valores iguais e pendência persistida |
 | 16 | `feat: process ROLLBACK reversals` | Inversão de BET/WIN/REFUND e código específico para reversão sem saldo |
@@ -242,3 +242,14 @@ Segundo incremento BET: migration00005 resultados imutáveis, mapper/repositóri
 locks por identidade e portas na UOW. Up/down e regras SQL validados em descartáveis;
 não há backfill fictício nem alteração de entidades. Processamento/replay serão
 integrados no incremento seguinte; este suporte sozinho não executa apostas.
+
+Terceiro incremento: ProcessWagerTransaction BET, replay persistente, rejeição por
+saldo insuficiente, erros de admissão, retry limitado de 40P01/40001 e composição Nest.
+Testes reais de sucesso/rejeição, histórico/restart, rollback e fronteira externa.
+Ainda sem outros kinds, HTTP, consumer/publisher ou migrations no principal.
+
+Etapa BET concluída: **601 testes distintos aprovados**, typecheck/build OK. Inclui
+50 chamadas em três processos Bun reais, replay histórico e disputa de saldo 80+80
+contra 100. Banco principal sem tabelas financeiras; bancos descartáveis removidos.
+Nenhum push. Próxima etapa recomendada: WIN/LOSS pelo mesmo fluxo, após autorização.
+HTTP, consumer/publisher e demais operações continuam fora da entrega atual.

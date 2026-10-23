@@ -334,3 +334,24 @@ O último comando reinicia os serviços: execute-o somente depois dos demais. Os
 de falha instalam triggers temporários exclusivamente no banco descartável ou injetam
 uma exceção na factory; nunca desativam constraints financeiras. A contagem das
 cinco tabelas após rollback e a espera observada no servidor são as evidências.
+
+### BET transacional e replay histórico
+
+```bash
+bun test ./test/bet-payload.test.ts ./test/wager-result-mapper.test.ts
+bun run test:bet
+```
+
+A suite BET usa somente bancos dwp_test_* e aplica as cinco migrations nesses bancos.
+Não execute migration:up no banco principal para rodá-la. O helper limpa conexões e
+banco ao final. Além dos casos funcionais/replay, testa constraints, falhas/retries e
+concorrência. O teste de 50 cópias inicia três processos Bun filhos reais;15 conexões de
+pool no máximo para esses filhos, além do observador/bloqueador. O script bet-worker.ts
+é fixture exclusiva de teste, recusa banco sem prefixo descartável e não é consumer.
+
+`bun run check` inclui os testes unitários novos. Continue executando também
+test:financial, test:persistence, test:wallet-creation, test:messaging, test:orm,
+test:migrations e, por último, test:infra (reinicia containers). Nunca rode test:infra
+em paralelo com suites que mantêm transações abertas. O replay persiste DTO v1,
+incluindo saldo original de rejeição; down da00005remove esses snapshots e é testado
+apenas em banco descartável. Não há rota de apostas nem publicação de eventos.

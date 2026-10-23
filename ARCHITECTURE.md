@@ -896,7 +896,7 @@ de snapshot para BET terminal nova é diferível. Nenhum backfill inventado para
 ausência de resultado deve ser erro explícito, nunca débito/rejeição reexecutado.
 
 Advisory transaction locks por (provider,key) e (provider,externalId), escopos distintos,
-endereços SHA-256 truncados para64bits assinados, ordenados numericamente. Colisões
+endereços SHA-256 truncados para 64 bits assinados, ordenados numericamente. Colisões
 podem gerar espera extra; valores exatos/UNIQUE continuam soberanos. O protocolo é
 admissão → Wallet NO KEY UPDATE → escritas → resultado/Outbox → commit. Futura Inbox
 deve ser adquirida antes da admissão, na mesma UOW. Uma operação por UOW evita ordem
@@ -908,3 +908,55 @@ taxonomia de conflitos do caso de uso.
 
 Referências: [locks PostgreSQL](https://www.postgresql.org/docs/17/explicit-locking.html)
 e [advisory transaction locks](https://www.postgresql.org/docs/17/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS).
+
+## ADR-023 — ProcessWagerTransaction restrito a BET
+
+Entrada validada/copiada antes da UOW; mesma função de processamento serve execute
+e processInTransaction. Execute é a fronteira pública que retorna após COMMIT e
+refaz até 3 tentativas completas para 40P01/40001. ProcessInTransaction é ponto interno
+de composição para futura Inbox: aceita os repositórios de uma UOW já aberta, não
+abre transação nem faz retry local. Seu resultado é provisório até o dono confirmar;
+futuro consumidor deverá executar Inbox → processamento → Inbox processada numa única
+UOW, fazer retry da fronteira inteira e ACK só após commit. Nenhum consumidor/Inbox
+operacional foi antecipado nesta etapa. Não usar execute dentro de outra UOW.
+
+Ordem: locks das duas identidades → lookup por key → lookup identidade externa
+→ Wallet NO KEY UPDATE → validar jogador/moeda → INSERT PENDING → Wallet.debit
+→ save Wallet → terminalizar transação → INSERT ledger → eventos → snapshot → COMMIT.
+Para saldo insuficiente, catch apenas WalletError/INSUFFICIENT_FUNDS: reject explícito,
+sem save da Wallet/ledger; um evento Rejected e snapshot do saldo observado sob lock.
+Não convertimos SQL ou qualquer Error em rejeição de negócio. Não usamos aritmética
+duplicada nem UPDATE condicional para repetir a regra que pertence à Wallet.
+
+Replay consulta apenas transação/snapshot e marca idempotentReplay=true. Não adquire
+lock de Wallet, não gera IDs/data, não compara com saldo atual e não reinsere eventos.
+Mesmo key/hash diferente dá IDEMPOTENCY_CONFLICT; externalId com outra key dá
+EXTERNAL_TRANSACTION_CONFLICT. Esses erros são de admissão, não status REJECTED.
+Wallet inexistente, jogador/moeda divergentes também são admissão inválida, conforme
+aprovação: não violamos FK para registrar uma operação sobre identidade inexistente.
+Registro legado PENDING ou terminal sem snapshot retorna ORIGINAL_RESULT_UNAVAILABLE;
+não é automaticamente retomado nem respondido com um saldo inventado.
+
+A UOW só traduz SQLSTATE40001/40P01 em RetryableFinancialTransactionError depois da
+rejeição da transactional oficial (rollback). O caso de uso espera10/20ms fora da
+transação e refaz locks/leituras/objetos com novo EntityManager; máximo3 tentativas.
+Não há retry de 23505, conexão caída, commit de resultado incerto ou rejeição de domínio.
+Falha esgotada não deixa FAILED: a tentativa inteira foi revertida. IDs podem ter
+lacunas porque tentativas abortadas consomem UUIDs; nada parcial é publicado/persistido.
+Backoff pequeno e limitado é suficiente para esta etapa local; política operacional
+de filas/telemetria não foi inferida. Alternativa sem retry automático foi discutida.
+Referência: [repetir a transação completa](https://www.postgresql.org/docs/17/mvcc-serialization-failure-handling.html).
+
+Eventos usam correlationId=transactionId/causationId=transactionId como contexto
+interno, payloads das factories existentes, occurredAt capturado depois do lock da
+Wallet. Requisições/trace/messageId pertencem à integração futura. Domínio e constraints
+financeiras anteriores permanecem intactos; quinta migration só acrescenta resultados.
+Composição Nest exporta ProcessWagerTransaction, sem controller ou rota financeira.
+
+Provas incluídas: saldo exato, rejeição, replay histórico após outros movimentos e
+recriação do ORM, rollback antes/depois de débito/Outbox/snapshot e no commit, composição
+de fronteira externa, retry limitado com falhas SQLSTATE injetadas no PostgreSQL.
+Essas injeções exercitam tratamento de falhas; não alegamos que provocam o detector
+real de deadlocks. Os locks reais são observados nos testes concorrentes. Resta provar
+recuperação por queda abrupta de processo em janelas de publicação/ACK quando esses
+componentes existirem, além dos demais kinds e transportes.
