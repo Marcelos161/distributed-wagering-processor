@@ -13,20 +13,20 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após BET
+## Comparação com o README — atualização após WIN/LOSS
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
 | PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest, migrations e mappers/repositórios validados | Operação nos ambientes alvo; principal ainda sem migrations financeiras |
 | Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Domínio e persistência implementados; CreateWallet com OPENING/ledger/Outbox atômicos | Demais casos de uso financeiros |
-| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Domínio completo; caso de uso BET com Outbox e rejeição persistida | Casos de uso WIN/LOSS/REFUND/ROLLBACK e entrada Inbox |
-| Concorrência por wallet (§8) | Ausente | BET 80+80/saldo 100 e 50 cópias em 3 processos reais validados, além de locks/criação | Outros kinds e janelas de falha distribuída |
+| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Domínio completo; BET/WIN/LOSS com Outbox, rejeição, pendências WIN e snapshots históricos | Casos de uso REFUND/ROLLBACK, reprocessador e entrada Inbox |
+| Concorrência por wallet (§8) | Ausente | BET 80+80/saldo 100, 50 BETs e 50 WINs em 3 processos reais, LOSS e operações mistas validadas | Outros kinds e janelas de falha distribuída |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
 | Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Modelo/schema/repositório Inbox e SQS local testados; sem consumer | Consumer, crash após commit antes de ACK, shutdown |
 | Outbox e eventos (§11) | Ausente | Eventos v1 e Outbox persistente; abertura grava dois eventos na mesma transação | Dois publishers, crash e redelivery |
 | Observabilidade (§12) | Ausente | Logs de startup JSON e liveness | Contexto completo, métricas e readiness |
-| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais; BET com replay, rollback e 3 processos Bun | Fluxos HTTP/SQS, kill-process e publishers |
+| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais; BET/WIN/LOSS com replay, rollback e 3 processos Bun | Fluxos HTTP/SQS, kill-process e publishers |
 | Documentação (§14) | Enunciado | Plano, arquitetura e guia | Atualização a cada funcionalidade |
 | Autenticação (§2) | Ausente | Decisão proposta, sem endpoints financeiros | Porta de identidade explícita e desenho OIDC |
 
@@ -48,9 +48,9 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 9 | `feat: define versioned integration events` | Concluída: classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
 | 10 | `feat: persist transactional outbox records` | Concluída: modelos/repositórios Inbox/Outbox na mesma transação; publicação pendente |
 | 11 | `feat: open and query wallets atomically` | Abertura concluída: OPENING/ledger/Outbox positivos, versão1; consultas públicas, controller e porta de identidade pendentes |
-| 12 | `feat: persist wager idempotency and original results` | Implementado para BET: unicidade por provedor, JSON canônico, snapshot imutável; replay após recriar ORM. Adaptador/replay HTTP pendente |
+| 12 | `feat: persist wager idempotency and original results` | Implementado para BET/WIN/LOSS: unicidade por provedor, JSON canônico, snapshot imutável; replay após recriar ORM. Adaptador/replay HTTP pendente |
 | 13 | `feat: process BET with wallet-level locking` | Implementado: débito + ledger + status + Outbox + resultado atômicos; validações concorrentes na seção29 do guia |
-| 14 | `feat: process WIN and LOSS transactions` | Crédito e resultado sem movimento; eventos e version corretos |
+| 14 | `feat: process WIN and LOSS transactions` | Concluído: crédito WIN/registro LOSS, referências pendentes ou rejeitadas, eventos e versões corretos; 62 testes PostgreSQL novos |
 | 15 | `feat: process full REFUND reversals` | Mesma referência completa, uma vez por tipo, valores iguais e pendência persistida |
 | 16 | `feat: process ROLLBACK reversals` | Inversão de BET/WIN/REFUND e código específico para reversão sem saldo |
 | 17 | `feat: expose wagering HTTP contracts` | DTOs, OPENING bloqueado, header obrigatório, erros consistentes, consultas e cursor opaco |
@@ -269,3 +269,12 @@ sem movimento, referências opcionais/pendência/rejeição, snapshots/replay hi
 atomicidade. 29 testes funcionais e 15 rollback novos executados em PostgreSQL. Worker
 não implementado; teste simula apenas a transição futura por entidades/repositórios.
 Próximo incremento desta autorização: concorrência real e fechamento de regressões.
+
+Etapa WIN/LOSS concluída: **678 testes distintos aprovados**, typecheck/build OK,
+62 testes PostgreSQL novos e 77 novos no total. WIN duplicada 50 vezes em 3 processos
+Bun → 1 crédito/49 replays; LOSS/pendência duplicadas 20 vezes → 1 registro/evento cada.
+Rejeições, replay histórico, referências fora de ordem, rollback e reconciliação
+validados. Principal permanece sem tabelas financeiras; nenhum dwp_test_* remanescente.
+Commits locais, sem push. Próxima etapa recomendada: REFUND e ROLLBACK, após autorização.
+Worker de referências, HTTP, consumers, publishers e políticas operacionais não foram
+iniciados. O desenvolvimento desta etapa foi encerrado.

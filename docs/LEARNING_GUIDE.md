@@ -4636,17 +4636,17 @@ correto. BETs processadas são imutáveis; uma referência confirmada não muda 
 A leitura após o lock em READ COMMITTED vê o commit do escritor anterior da carteira.
 Não travamos a identidade da referência depois da Wallet: isso poderia inverter a
 ordem de locks e criar ciclos. Uma referência não visível vira pendência, que é segura.
-Base: [isolamento PostgreSQL17](https://www.postgresql.org/docs/17/transaction-iso.html)
+Base: [isolamento PostgreSQL 17](https://www.postgresql.org/docs/17/transaction-iso.html)
 e [locks de linhas](https://www.postgresql.org/docs/17/explicit-locking.html).
 
 ### Repetição pendente e transição futura
 
-WIN chega antes da BET: grava PENDING_REFERENCE, comprovante100.00/versão1 e1evento.
-BET chega e debita25.00: Wallet75.00/versão2. Reenviar a WIN continua retornando o
-comprovante100.00, sem crédito ou evento adicional. O futuro worker deverá adquirir
+WIN chega antes da BET: grava PENDING_REFERENCE, comprovante 100.00/versão1 e 1 evento.
+BET chega e debita 25.00: Wallet 75.00/versão2. Reenviar a WIN continua retornando o
+comprovante 100.00, sem crédito ou evento adicional. O futuro worker deverá adquirir
 as mesmas identidades antes da Wallet, reler a pendência e a BET, aplicar o domínio,
 gravar movimento/lifecycle/novos eventos/resultado terminal atomicamente. Depois,
-replay retornará115.50/PROCESSED. O comprovante100.00 continua imutável para auditoria.
+replay retornará115.50/PROCESSED. O comprovante 100.00 continua imutável para auditoria.
 Isso foi simulado num teste por composição explícita dos repositórios; **não existe
 worker, agendamento, TTL nem retry operacional de referências nesta entrega**.
 
@@ -4665,14 +4665,14 @@ assertion/SQL falha o teste; recursos são encerrados no finally do helper.
 
 | Teste (nome inicial) | Parâmetro, lógica e evidência |
 |---|---|
-| `BET followed by %s...` | WIN/LOSS: abre100, debita25, processa resultado; confere115.50 ou75.00, versão3 ou2, ledger, eventos não publicados, snapshot e xmin igual entre registros. |
-| `WIN decimal addition...` | Sem parâmetro:0.10+0.20=0.30; wallet no teto rejeita40.50 com evento e sem ledger. |
+| `BET followed by %s...` | WIN/LOSS: abre 100, debita 25, processa resultado; confere 115.50 ou 75.00, versão3 ou2, ledger, eventos não publicados, snapshot e xmin igual entre registros. |
+| `WIN decimal addition...` | Sem parâmetro:0.10+0.20=0.30; wallet no teto rejeita 40.50 com evento e sem ledger. |
 | `%s admission leaves...` | 11 casos: WIN zero/negativo/teto; LOSS positivo/referência; ambos com wallet ausente/jogador/moeda incorretos. Estado integral deve permanecer igual. |
 | `%s replay survives...` | WIN/LOSS: processa, faz BET posterior, fecha ORM de verdade e abre outro; replay histórico, hash divergente e externalId com outra key não alteram tabelas. |
 | `%s same identities...` | WIN/LOSS em dois provedores, mesma key/external: dois IDs diferentes, saldo181 ou100. |
-| `WIN resolves processed BET...` | Referência processada, prêmio40.50 diferente da aposta25, game diferente permitido; ID interno resolvido e mudar referência conflita com hash. |
-| `WIN reference %s...` | 9 cenários: rodada, wallet/jogador, moeda, kind, rejeitada, failed, pending, ausente, outro provedor. Rejeita seis; aguarda últimos três; nenhum crédito e só um evento, replay sem escrita. Identidades impossíveis pelas FKs não são artificialmente persistidas: wallet/jogador divergentes vêm de outra wallet válida. |
-| `WIN before BET...` | Chegada fora de ordem, replay pendente após BET e transição futura simulada com entidades/ledger/eventos; prova coexistência de receipt100 e result115.50. |
+| `WIN resolves processed BET...` | Referência processada, prêmio 40.50 diferente da aposta 25, game diferente permitido; ID interno resolvido e mudar referência conflita com hash. |
+| `WIN reference %s...` | 9 cenários: rodada, wallet/jogador, moeda, kind, rejeitada, failed, pending, ausente, outro provedor. Rejeita seis; aguarda os últimos três; nenhum crédito e só um evento, replay sem escrita. Identidades impossíveis pelas FKs não são artificialmente persistidas: wallet/jogador divergentes vêm de outra wallet válida. |
+| `WIN before BET...` | Chegada fora de ordem, replay pendente após BET e transição futura simulada com entidades/ledger/eventos; prova coexistência de receipt 100 e result 115.50. |
 
 ### Falhas e rollback
 
@@ -4684,11 +4684,11 @@ repositórios mockados. Wrappers de UOW só posicionam barreiras/observação.
   em WIN a falha Outbox ocorre no segundo evento, depois do primeiro. Compara todas
   as tabelas, remove trigger com DROP FUNCTION CASCADE e repete usando estado fresco.
 - `%s cannot report success before deferred commit...`: WIN/LOSS/pendência. Wrapper
-  executa caso de uso, altera Wallet em0.01 sem ledger e segura antes do commit.
+  executa caso de uso, altera Wallet em 0.01 sem ledger e segura antes do commit.
   Observador vê só estado anterior e promise não retornou sucesso. Libera,23514
   reverte tudo; reutilizar Wallet suja falha ownership; nova execução funciona.
 - `WIN retry after a server serialization failure...`: `retry_win(): trigger` usa
-  sequência win_attempts, falha40001 no primeiro INSERT do snapshot (após crédito,
+  sequência win_attempts, falha 40001 no primeiro INSERT do snapshot (após crédito,
   ledger e eventos). Sequência não é revertida; segunda tentativa confirma um único
   crédito/versão2. Prova tratamento do SQLSTATE injetado, não detector de deadlock.
 
@@ -4701,3 +4701,110 @@ typecheck/build. `bun run test:wager` passou 50 testes (6 snapshots, 29 funciona
 15 rollback). `bun run test:bet` passou os 40 anteriores. Nenhum teste usa o banco
 principal. A ampliação do processador foi mantida em um commit coerente para evitar
 duplicar o caminho transacional por kind; provas adicionais de concorrência vêm a seguir.
+
+## 33. Concorrência WIN/LOSS, testes SQL diretos e fechamento
+
+Saldo e versão são observados depois de lock NO KEY UPDATE. Duas WINs de40.50 numa
+carteira 100.00 acabam em 181.00/versão3; nenhuma lê 100.00 simultaneamente para substituir
+o saldo da outra. BET 25 seguida de WIN 40.50 acaba em115.50, assim como a ordem inversa
+quando ambas são admissíveis. Em geral a ordem importa: uma BET sem fundos pode ser
+rejeitada se ocorrer antes do prêmio; não deve ser reescrita depois para PROCESSED.
+LOSS concorre para observar o saldo confirmado, mas não acrescenta movimento/versão.
+
+### Testes e funções de concorrência
+
+`infra/test/wager-concurrency.test.ts` usa ORM separado, SQL de observação real,
+barreiras gate/bounded/observeWait existentes e o mesmo ProcessWagerTransaction.
+Callbacks retornam Promise<void>; erros de query/timeout/assertion falham a suíte.
+Recursos são liberados em finally; todo caso termina com assertReconciled.
+
+| Teste | Parâmetros, passo a passo e garantia |
+|---|---|
+| `%s then concurrent %s...` | Cinco pares WIN/WIN, BET/WIN, WIN/BET, WIN/LOSS, LOSS/WIN. Primeira UOW pausa antes do commit; segunda instância espera lock observado em pg_stat_activity; uma terceira operação de outra wallet confirma. Libera primeira, verifica segunda e saldo/versão finais. |
+| `20 concurrent %s copies...` | LOSS e WIN pendente. Uma chamada segura commit e 19 chamadas disputam identidades na outra instância. Após liberação, 19 replays iguais, uma transação/evento/snapshot, saldo 100/versão1. |
+| `WIN concurrent with BET...` | Modo reference: WIN espera Wallet e depois resolve BET confirmada. Modo external-conflict: disputa mesmo externalId com outra key espera advisory e retorna conflito, sem crédito. |
+| `crossed WIN references...` | Duas wallets, cada WIN aponta para externalId da outra. Segura ambos INSERTs reais antes de consultar referências; não adiciona locks cruzados. Concluem pendentes ou rejeitadas conforme visibilidade/identidade, sem crédito e sem ciclo de locks. |
+| `50 concurrent WIN copies...` | Trava wallet, inicia 3 processos Bun com 17+17+16 chamadas e nomes distintos; observa os 3 bloqueados no PostgreSQL antes de liberar. Coleta 3 PIDs, 50 respostas, 1 execução/49 replays, 1 crédito/resultado, 2 eventos, saldo 140.50/versão2. |
+
+Helpers locais de teste também têm contratos explícitos:
+
+- Wrappers `paused.run(work)` recebem callback da UOW e retornam sua Promise; delegam
+  às queries reais, abrem held após callback e esperam release antes do commit. Usados
+  nos três primeiros testes; propagam erro, não substituem PostgreSQL nem repos.
+- `pauseAfterInsert(base: FinancialUnitOfWork): FinancialUnitOfWork`, dentro do teste
+  cruzado, delega todas as operações; só o callback `transactions.insert(tx)` espera
+  após INSERT real até as duas sessões chegarem. `arrived` é sincronização de teste,
+  nunca garantia de idempotência. Retorna UOW instrumentada, erros/timeout propagam.
+- Callback `blocker` da prova multiprocesso obtém o lock real e o mantém até release;
+  retorna Promise<void>. Callback `children.map(count,index)` recebe contagem/index,
+  monta URL com application_name e inicia filho com stdin desnecessário e stdout/stderr
+  em pipes. Callback de coleta aguarda streams+exitCode, exige zero/stderr vazio e
+  interpreta relatório `{pid,results}`; timeout encerra teste e finally termina filhos.
+- `infra/test/bet-worker.ts`, programa top-level reaproveitado: só o tipo da entrada
+  passou de BetInput a WagerInput. Mantém nomes DWP_BET_* por compatibilidade. Lê URL
+  e recusa host fora de 127.0.0.1 ou banco sem prefixo dwp_test_; valida contagem 1..50,
+  cria ORM/ProcessWagerTransaction com UUID/Clock reais, executa chamadas em paralelo,
+  escreve JSON no stdout e fecha ORM. Erro gera exitCode não zero. Número serve apenas
+  à contagem/PID, jamais a dinheiro. Não é consumer SQS nem worker de pendências.
+
+`infra/test/wager-snapshots.test.ts::direct SQL cannot forge...` acrescenta sete
+INSERTs SQL inválidos dentro de transações reais: schema 2, identidade diferente,
+status incorreto, failureCode em pendência, moeda/saldo divergentes e dinheiro não
+canônico. O callback de cada app.begin cria WIN pendente e tenta receipt; espera 23514
+com rollback de ambos. Não depende do mapper para barrar dados inválidos. Os sete
+casos compõem um teste, e não são contados como sete testes distintos no relatório.
+
+A prova de ausência de deadlock é delimitada aos cenários exercitados, com waits reais
+e deadlines. Não promete ausência universal de deadlock para SQL arbitrário ou novos
+fluxos futuros. O protocolo não ganhou locks sobre a identidade de referência e o
+retry limitado já existente permanece disponível para 40001/40P01.
+
+### Comandos executados e resultados finais
+
+Ambiente: Bun 1.4.3, PostgreSQL 17 em Docker e LocalStack Community 4.14.0. Se Bun não
+estiver no PATH, este checkout permite `export PATH="$PWD/.tools/node_modules/.bin:$PATH"`.
+`DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering` foi usada
+nos checks de configuração. Credencial estritamente local; testes financeiros criam
+seu próprio banco descartável, mesmo com essa variável apontando para o principal.
+
+| Comando real | Resultado |
+|---|---|
+| `bun run check` | typecheck OK, 478 testes/2558 assertions, build OK |
+| `bun run test:financial` | 34 testes, 0 falhas |
+| `bun run test:persistence` | 15 testes, 0 falhas |
+| `bun run test:messaging` | 14 testes, 0 falhas |
+| `bun run test:wallet-creation` | 25 testes, 0 falhas |
+| `bun run test:bet` | 40 testes, 0 falhas |
+| `bun run test:wager` | 62 testes/434 assertions, 0 falhas:7 snapshots, 29 funcionais, 15 rollback, 11 concorrência |
+| `bun run test:orm` | 2 testes, 0 falhas |
+| `bun run test:migrations` | 2 testes, 0 falhas |
+| `bun run test:infra` (por último) | 2 PostgreSQL +4 SQS, 0 falhas; restart/recriação, envio/recebimento/delete/DLQ reais |
+| `git diff --check` | sem erros |
+
+Total **678 testes distintos**, 77 além dos 601 anteriores: 13 novos de payload,
+2 de mapper e 62 PostgreSQL. Reexecuções não foram somadas. Build/typecheck não são
+contados como testes. A consulta abaixo foi executada após os testes de containers:
+
+```bash
+docker compose exec -T postgres psql -U wager_admin -d wagering \
+  -c "SELECT tablename FROM pg_tables WHERE schemaname='public';" \
+  -c "SELECT datname FROM pg_database WHERE datname LIKE 'dwp_test_%';"
+```
+
+Resultado de ambas: `(0 rows)`. `docker compose ps`: PostgreSQL e LocalStack healthy.
+Nenhuma migration financeira foi aplicada ao principal, nenhum volume foi apagado.
+Não há arquivos de execução, dependências instaladas ou segredos nos commits.
+
+Problemas encontrados e tratados: a tabela de resultados aceitava apenas BET e
+exigia ledger para todo PROCESSED;00006 estende kinds e respeita LOSS. Pendência não
+podia ocupar o único resultado terminal; tabela separada aprovada preserva ambos.
+O código antigo escolhia evento pela existência de movimento; agora usa status para
+não chamar LOSS de rejeição. Assertions novas exigiram enums/tipos exatos do Bun;
+foram corrigidas antes dos commits. Não foi necessário modificar Money, Wallet,
+WagerTransaction, eventos de domínio ou migrations anteriores.
+
+A entrega termina aqui. Próxima etapa recomendada: REFUND e depois ROLLBACK no mesmo
+fluxo, mediante autorização. O reprocessador de pendências precisará de política
+própria de tentativas/TTL; continua pendente junto com HTTP, consumidores, publishers,
+autenticação e observabilidade operacional. Não confundir os eventos na Outbox com
+publicação realizada ou os testes multiprocesso com um consumer implementado.

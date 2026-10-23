@@ -365,3 +365,9 @@ Use `bun run check` para typecheck/unitários/build. Não é necessário migrar 
 principal para executar testes; não use `migration:up` contra ele por este motivo.
 Downgrade00006 recusa55000 se houver resultados WIN/LOSS ou comprovantes pendentes,
 para não apagar auditoria. A volta sem dados novos é validada em banco descartável.
+
+A suíte WIN/LOSS também inicia três processos Bun reais para 50 duplicatas de WIN,
+reutilizando bet-worker.ts e suas variáveis DWP_BET_*. São fixtures de teste, sem
+entrada HTTP/SQS. Há 20 duplicatas LOSS/pendente e disputas mistas em sessões reais.
+Execute `test:infra` somente depois que todas as suítes de banco terminarem: ele
+reinicia PostgreSQL e recria LocalStack. Os bancos descartáveis são removidos ao final.

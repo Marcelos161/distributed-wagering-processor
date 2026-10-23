@@ -1013,3 +1013,11 @@ não vira rejeição financeira. Scripts/testes em bancos descartáveis não apl
 ao principal. HTTP, consumers, publishers, REFUND/ROLLBACK e worker aguardam nova etapa.
 Fontes: [READ COMMITTED](https://www.postgresql.org/docs/17/transaction-iso.html),
 [locks PostgreSQL](https://www.postgresql.org/docs/17/explicit-locking.html).
+
+Evidência final da ADR025: 62 testes PostgreSQL novos, incluindo 11 de concorrência,
+50 WINs em 3 processos, 20 duplicatas LOSS/pendente, referências cruzadas, disputas de
+identidade e carteiras independentes. Saldo reconciliado com ledger; callbacks não
+retornam sucesso antes de commit, falhas diferíveis revertem tudo. Regressão completa:
+678 testes distintos, typecheck/build OK; principal sem tabelas financeiras. Não se
+alega ausência universal de deadlocks: provas cobrem os cenários observados e protocolo
+cooperativo; novos writers precisam manter ordem de locks e constraints.

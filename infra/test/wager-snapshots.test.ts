@@ -86,3 +86,29 @@ test.each([WagerTransactionKind.Win, WagerTransactionKind.Loss])('%s terminal ca
     await assertReconciled(app);
   });
 }, 20000);
+
+test('direct SQL cannot forge pending receipt shape identity currency balance or schema version', async () => {
+  await withWagerDatabase(async ({ unit, app }) => {
+    const wallet = await creator(unit).execute(fundedInput);
+    const receipt = { transactionId: 'bad-receipt', status: 'PENDING_REFERENCE', balance: wallet.balance };
+    const cases = [
+      { version: 2, response: receipt },
+      { version: 1, response: { ...receipt, transactionId: 'other' } },
+      { version: 1, response: { ...receipt, status: 'PROCESSED' } },
+      { version: 1, response: { ...receipt, failureCode: 'INVALID_REFERENCE' } },
+      { version: 1, response: { ...receipt, balance: { amount: '100.00', currency: 'USD' } } },
+      { version: 1, response: { ...receipt, balance: { amount: '101.00', currency: 'BRL' } } },
+      { version: 1, response: { ...receipt, balance: { amount: '0100.00', currency: 'BRL' } } },
+    ];
+    for (const { version, response } of cases) {
+      await expectSqlState(() => app.begin(async connection => {
+        await insertTransaction(connection, { id: 'bad-receipt', kind: 'WIN', status: 'PENDING_REFERENCE',
+          wallet: wallet.id, player: 'player', externalReference: 'absent' });
+        await connection`INSERT INTO wager_pending_receipts VALUES ('bad-receipt',${version},1,${response})`;
+      }), '23514');
+    }
+    expect(await app`SELECT * FROM wager_pending_receipts`).toEqual([]);
+    expect(await app`SELECT id FROM wager_transactions WHERE id='bad-receipt'`).toEqual([]);
+    await assertReconciled(app);
+  });
+}, 20000);
