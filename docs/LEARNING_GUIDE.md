@@ -3559,3 +3559,33 @@ Continuam pendentes: cálculo canônico de hash na admissão, casos de uso públ
 replay HTTP, publishers/consumers, lease/claim concorrente de publicação, ack e DLQ
 operacionais, kill-process e reprocessamento de referências. Não afirmamos que chamar
 save de Wallet sozinho passa a produzir eventos automaticamente.
+
+## 24. Conflito explícito na criação de carteira
+
+Primeiro incremento de CreateWallet: converter apenas a unicidade esperada, sem
+ocultar outros defeitos de persistência. Não fazemos SELECT antes do INSERT: duas
+sessões poderiam observar ausência simultaneamente. O índice UNIQUE é a autoridade.
+
+- `WalletAlreadyExistsError.constructor(options?: ErrorOptions)`, em
+  `src/application/errors/wallet-already-exists-error.ts`: cria Error com nome próprio,
+  código `WALLET_ALREADY_EXISTS` e causa opcional. Não contém HTTP nem ORM; o futuro
+  controller poderá traduzir esse conflito em409. Retorna a instância construída;
+  não consulta banco e não implica replay. Exemplo: segunda abertura BRL para player1.
+- `MikroWalletRepository.insert(wallet: Wallet): Promise<void>`, em
+  `src/infrastructure/persistence/financial/wallet-repository.ts`: mantém ownership,
+  mapper e INSERT parametrizado. Agora captura erro somente se SQLSTATE23505,
+  schema public, tabela wallets e constraint wallets_player_currency_unique
+  coincidirem; lança o erro de aplicação preservando cause. Todos os demais erros
+  são relançados intactos. A UOW recebe a rejeição e faz rollback; não tentamos usar
+  a transação SQL já abortada. Chamado por casos de uso e testes de repositório.
+- Teste `only the player and currency constraint becomes a wallet creation conflict`,
+  em `infra/test/wallet-creation-conflict.test.ts`: callback async sem parâmetros,
+  retorna Promise<void>. withMessagingDatabase aplica migrations em banco descartável;
+  helper local `make(id: string, playerId: string): Wallet` usa Wallet.open real,
+  Money.zero(BRL) e data atual. Insere uma carteira, repete jogador/moeda e verifica
+  classe/código/cause; repete ID com outro jogador e exige wallets_pkey original.
+  Consulta final exige apenas uma linha. Qualquer erro inesperado/assertion/timeout
+  falha o teste, cujo finally de suporte fecha conexões e remove só esse banco.
+
+Evidência executada: typecheck aprovado; esse teste real aprovado (5 assertions).
+O caso de uso completo ainda será implementado no próximo incremento desta etapa.

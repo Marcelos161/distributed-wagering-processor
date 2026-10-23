@@ -1,3 +1,4 @@
+import { WalletAlreadyExistsError } from '../../../application/errors/wallet-already-exists-error.js';
 import type { WalletRepository } from '../../../application/ports/financial-persistence.js';
 import type { Wallet } from '../../../domain/wallet/wallet.js';
 import { FinancialSession } from './financial-session.js';
@@ -32,8 +33,17 @@ export class MikroWalletRepository implements WalletRepository {
   async insert(wallet: Wallet): Promise<void> {
     this.session.attachWallet(wallet, true);
     const row = WalletMapper.toRecord(wallet);
-    await this.session.execute('INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [row.id, row.player_id, row.currency, row.balance, row.version, row.created_at, row.updated_at]);
+    try {
+      await this.session.execute('INSERT INTO wallets (id, player_id, currency, balance, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [row.id, row.player_id, row.currency, row.balance, row.version, row.created_at, row.updated_at]);
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === '23505'
+        && 'schema' in error && error.schema === 'public' && 'table' in error && error.table === 'wallets'
+        && 'constraint' in error && error.constraint === 'wallets_player_currency_unique') {
+        throw new WalletAlreadyExistsError({ cause: error });
+      }
+      throw error;
+    }
   }
 
   async save(wallet: Wallet): Promise<void> {
