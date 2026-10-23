@@ -1,3 +1,7 @@
+> **Entrega final:** para executar API e workers com banco de demonstração separado,
+> siga [EVALUATOR_GUIDE.md](EVALUATOR_GUIDE.md). As seções abaixo mantêm detalhes
+> históricos da infraestrutura e integração ORM; o fluxo atual usa dez migrations.
+
 # Executar a aplicação base e a infraestrutura local
 
 Esta base disponibiliza somente `GET /health/live`. A aplicação conecta ao PostgreSQL

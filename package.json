@@ -45,7 +45,9 @@
     "test:publisher": "bun test ./infra/test/publisher.test.ts",
     "test:distributed": "bun test ./infra/test/distributed.test.ts",
     "lint": "bun x --bun --no-install eslint src test infra/test scripts migrations mikro-orm.config.ts",
-    "test:delivery-migrations": "bun test ./infra/test/delivery-migrations.test.ts"
+    "test:delivery-migrations": "bun test ./infra/test/delivery-migrations.test.ts",
+    "demo:setup": "bun scripts/demo-setup.ts",
+    "test:all": "bun run lint && bun run check && bun run test:financial && bun run test:persistence && bun run test:messaging && bun run test:wallet-creation && bun run test:bet && bun run test:wager && bun run test:refund && bun run test:rollback && bun run test:references && bun run test:api && bun run test:consumer && bun run test:publisher && bun run test:distributed && bun run test:delivery-migrations && bun run test:orm && bun run test:migrations && bun run test:infra"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

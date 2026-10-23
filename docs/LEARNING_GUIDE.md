@@ -5476,3 +5476,29 @@ tiver mensagens, inclusive em voo. Nunca apaga mensagens de terceiros para testa
 `eslint.config.mjs` aplica recommended do typescript-eslint; somente o teste de
 contratos HTTP permite any para respostas JSON heterogêneas. Produção continua strict.
 Comandos: `bun run lint`, `bun run test:distributed`, `bun run test:delivery-migrations`.
+
+## 45. Setup seguro para avaliação
+
+`scripts/demo-setup.ts::compose(...args:string[]):Promise<string>` executa Docker
+sem shell, na raiz calculada por import.meta.url; drena stdout/stderr em paralelo,
+retorna stdout somente se exit0 e lança erro sanitizado em falha. `setup():Promise<void>`
+é chamado pelo entrypoint: sobe serviços/health, reconcilia filas sem purge, lê config
+em memória, recusa usar banco principal como demo, consulta pg_database por parâmetro,
+cria nome fixo wagering_demo apenas se ausente, aplica migrations oficiais, fecha ORM,
+verifica SELECT com usuário da aplicação e grava dois arquivos locais600 ignorados.
+Não recebe parâmetros; configuração vem do Compose/.env. Não apaga bancos nem volumes.
+Falhas de Docker, conexão, permissões, migration ou disco chegam ao catch do entrypoint,
+que imprime mensagem sem credenciais e define exitCode1. Recursos SQL fecham em finally.
+Não há transação envolvendo CREATE DATABASE: PostgreSQL não permite; uma falha posterior
+pode deixar banco criado, e a reexecução retoma migrations pelo histórico. Nunca se
+faz down automático. A lista de arquivos separa credencial de migration da aplicação.
+
+`package.json::test:all` executa as suítes sequencialmente com &&: a primeira falha
+interrompe o comando. Infra reinicia containers somente no fim, sem outros testes em
+voo. Exemplo `bun run demo:setup` prepara banco; `bun --env-file=.env.demo run start`
+inicia a API. Quatro terminais explícitos permitem observar cada papel sem introduzir
+um orquestrador de processos novo. Detalhes de execução em EVALUATOR_GUIDE.md.
+
+Evidência do setup: duas execuções consecutivas terminaram com `Demo ready`; a
+primeira aplicou00001–00010, a segunda não reaplicou nenhuma. Lint e typecheck passaram.
+A regressão anterior ao setup aprovou792testes, inclusive restart/recriação da infra.
