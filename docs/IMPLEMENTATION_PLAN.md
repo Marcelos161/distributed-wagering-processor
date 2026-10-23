@@ -289,3 +289,10 @@ Segundo incremento REFUND: migration00007 compatível, lookup do reembolso proce
 e mapper de DUPLICATE_REVERSAL. Quatro testes PostgreSQL reais de preservação/up/down,
 respostas obrigatórias, lookup e proteção definitiva por UNIQUE. Integração no caso de
 uso e provas de concorrência ainda serão concluídas nesta autorização.
+
+Terceiro incremento REFUND: integrado no ProcessWagerTransaction compartilhado,
+com crédito integral, rejeição de duplicidade/overflow, referência pendente ou inválida,
+replay e snapshots. Os 29 testes funcionais e 15 de rollback usam PostgreSQL real.
+Nenhum worker iniciado; um teste compõe manualmente a conclusão futura para provar
+que receipt e resultado terminal coexistem. Fechamento de concorrência e regressões
+permanece no último incremento desta autorização.

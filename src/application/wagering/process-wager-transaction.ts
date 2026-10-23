@@ -64,7 +64,9 @@ export class ProcessWagerTransaction {
     // Do not acquire reference identity/wallet locks here: that would invert admission order.
     const reference = input.referenceExternalTransactionId === undefined ? undefined
       : (await repos.transactions.findByExternalId(input.providerId, input.referenceExternalTransactionId)) ?? undefined;
-    const movement = this.apply(tx, wallet, reference, at);
+    const previousRefund = tx.kind === WagerTransactionKind.Refund && reference
+      ? await repos.transactions.findProcessedRefund(reference.id) : null;
+    const movement = this.apply(tx, wallet, reference, at, previousRefund);
     if (movement) await repos.wallets.save(wallet);
     await repos.transactions.updateLifecycle(tx);
     if (movement) await repos.ledger.insert(movement.entry, movement.walletVersion);
@@ -93,13 +95,17 @@ export class ProcessWagerTransaction {
   }
 
   /** Mutates only fresh domain objects. Persistence and event selection stay in the shared path. */
-  private apply(tx: WagerTransaction, wallet: Wallet, reference: WagerTransaction | undefined, at: Date): WalletMovementResult | undefined {
-    if (tx.kind === WagerTransactionKind.Win) {
-      try { tx.ledgerDirectionFor(reference); } // Reuse domain reference validation before any credit.
-      catch (error) {
+  private apply(tx: WagerTransaction, wallet: Wallet, reference: WagerTransaction | undefined, at: Date, previousRefund: WagerTransaction | null): WalletMovementResult | undefined {
+    if (tx.kind === WagerTransactionKind.Win || tx.kind === WagerTransactionKind.Refund) {
+      // Reuse domain reference validation before any credit.
+      try {
+        if (tx.kind === WagerTransactionKind.Refund) tx.assertRefundAvailable(reference, previousRefund);
+        else tx.ledgerDirectionFor(reference);
+      } catch (error) {
         if (!(error instanceof WagerTransactionError)) throw error;
         if (error.code === 'REFERENCE_REQUIRED' || error.code === 'REFERENCE_NOT_PROCESSED') tx.markPendingReference();
         else if (error.code === 'INVALID_REFERENCE') tx.reject(FailureCode.InvalidReference);
+        else if (error.code === 'DUPLICATE_REVERSAL') tx.reject(FailureCode.DuplicateReversal);
         else throw error;
         return undefined;
       }

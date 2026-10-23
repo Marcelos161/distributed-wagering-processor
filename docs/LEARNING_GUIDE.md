@@ -4811,11 +4811,11 @@ publicação realizada ou os testes multiprocesso com um consumer implementado.
 
 ## 34. REFUND: contrato e decisão de domínio sobre duplicidade
 
-REFUND devolve integralmente o valor de uma BET processada. Exemplo:100.00 menos BET25.00
-é75.00; REFUND25.00 restaura100.00, deixando dois lançamentos auditáveis em vez de apagar
+REFUND devolve integralmente o valor de uma BET processada. Exemplo: 100.00 menos BET 25.00
+é 75.00; REFUND 25.00 restaura 100.00, deixando dois lançamentos auditáveis em vez de apagar
 a aposta. WIN paga um prêmio independente; ROLLBACK inverte uma operação elegível
 (BET/WIN/REFUND), mas ainda não é processado pelo caso de uso. Reembolso parcial não
-faz parte do contrato, portanto10.00 sobre BET25.00 é referência inválida.
+faz parte do contrato, portanto 10.00 sobre BET 25.00 é referência inválida.
 
 Auditoria: índice parcial `wager_successful_reversal_unique` já garante unicidade de
 (reference_transaction_id,kind) para PROCESSED REFUND/ROLLBACK. Não será substituído
@@ -4846,7 +4846,7 @@ e aquele status exige referência. BET PENDING é o estado de espera alcançáve
   sob lock e decidirá persistir reject(DuplicateReversal). A consulta local não substitui
   UNIQUE nem promete descobrir registros que o chamador não forneceu. Nenhum ORM no domínio.
   Outros erros: INVALID_KIND, INVALID_TRANSACTION_STATE e os erros de referência já
-  existentes. Exemplo: refund-b detecta refund-a processado da BET25 e permanece PENDING
+  existentes. Exemplo: refund-b detecta refund-a processado da BET de 25.00 e permanece PENDING
   até o chamador invocar reject. A extensão de WagerTransactionErrorCode só acrescenta
   DUPLICATE_REVERSAL; a factory de erro mantém construtor/code/name anteriores.
 
@@ -4859,14 +4859,14 @@ Callbacks de testes retornam void, usam expect e falham com assertion/erro inesp
 
 | Teste | Parâmetros e sequência |
 |---|---|
-| `REFUND canonical hash...` | Normaliza00025.00, troca key sem mudar hash; troca referência/kind e exige outro hash; verifica imutabilidade. |
+| `REFUND canonical hash...` | Normaliza 00025.00, troca key sem mudar hash; troca referência/kind e exige outro hash; verifica imutabilidade. |
 | `REFUND rejects missing...` | undefined/null/vazio/espaço/self; todos falham antes da persistência. |
-| `REFUND rejects inadmissible...` | zero/negativo/escala3/teto excedido; todos rejeitados. |
+| `REFUND rejects inadmissible...` | zero/negativo/escala 3/teto excedido; todos rejeitados. |
 | `refund availability accepts...` | BET processada, nenhum anterior permite; REFUND anterior processado lança DUPLICATE_REVERSAL sem mutar; depois reject torna terminal e proíbe nova consulta mutável. |
 | `refund availability delegates...` | Ausência/PENDING/valor parcial/kind errado/evidência anterior ainda pendente; confere códigos e TypeError. |
 | `%s hash with reference=%s...` | Quatro vetores BET/WIN sem e com referência/LOSS, hashes calculados independentemente com Python hashlib e JSON ordenado. Protegem compatibilidade, além do vetor BET já existente. |
 
-Validação do contrato: `bun run check` passou typecheck,494 testes e build;16 testes
+Validação do contrato: `bun run check` passou typecheck, 494 testes e build; 16 testes
 novos nesta etapa. Nenhum SQL financeiro foi aplicado ao principal.
 
 ## 35. Persistência de REFUND e consulta do reembolso anterior
@@ -4878,10 +4878,10 @@ As tabelas v1, hashes, valores, dados anteriores, imutabilidade e permissões pe
 | Função/SQL | Responsabilidade, parâmetros, fluxo, retorno e erros |
 |---|---|
 | `up(): Promise<void>` | Chamado pelo migrator, enfileira CREATE OR REPLACE das três funções via addSql. DDL transacional; não recebe parâmetros nem faz backfill. Reaplicar migrations não repete alterações. Falhas SQL propagam e revertem a migration. |
-| `check_wager_pending_receipt(): trigger` | BEFORE INSERT recebe NEW; exige WIN ou REFUND pendente, mesma moeda e saldo/versão da carteira sob NO KEY UPDATE. Retorna NEW;23503 para transação inexistente,23514 para inconsistência; CHECKs/PK existentes continuam ativos. |
-| `check_wager_result(): trigger` | Acrescenta REFUND terminal à lista anterior. Valida JSON, vínculo/status/failureCode/moeda, saldo/versão travados; REFUND PROCESSED exige ledger correspondente. Retorna NEW ou23514/23503. A validação de referência/integralidade do ledger continua nas funções financeiras anteriores. |
-| `require_bet_result(): trigger` | Nome legado: no COMMIT consulta estado final; exige resultado de REFUND terminal ou receipt de REFUND pendente, além das regras anteriores. Retorna NULL; falta de resposta causa23514 e rollback completo. |
-| `down(): Promise<void>` | Bloco DO consulta as duas tabelas por kind REFUND e recusa55000 se houver dados novos. Caso contrário restaura exatamente as três funções da00006. Preserva WIN/LOSS/BET e tabelas; testado com snapshots anteriores reais. Não descarta auditoria para facilitar downgrade. |
+| `check_wager_pending_receipt(): trigger` | BEFORE INSERT recebe NEW; exige WIN ou REFUND pendente, mesma moeda e saldo/versão da carteira sob NO KEY UPDATE. Retorna NEW; 23503 para transação inexistente,23514 para inconsistência; CHECKs/PK existentes continuam ativos. |
+| `check_wager_result(): trigger` | Acrescenta REFUND terminal à lista anterior. Valida JSON, vínculo/status/failureCode/moeda, saldo/versão travados; REFUND PROCESSED exige ledger correspondente. Retorna NEW ou 23514/23503. A validação de referência/integralidade do ledger continua nas funções financeiras anteriores. |
+| `require_bet_result(): trigger` | Nome legado: no COMMIT consulta estado final; exige resultado de REFUND terminal ou receipt de REFUND pendente, além das regras anteriores. Retorna NULL; falta de resposta causa 23514 e rollback completo. |
+| `down(): Promise<void>` | Bloco DO consulta as duas tabelas por kind REFUND e recusa 55000 se houver dados novos. Caso contrário restaura exatamente as três funções da 00006. Preserva WIN/LOSS/BET e tabelas; testado com snapshots anteriores reais. Não descarta auditoria para facilitar downgrade. |
 
 `WagerTransactionRepository.findProcessedRefund(referenceId: string): Promise<WagerTransaction|null>`
 foi acrescentado em `src/application/ports/financial-persistence.ts`. Adaptador
@@ -4895,34 +4895,173 @@ listar todos os movimentos para filtrar em memória seria mais cara e menos clar
 
 `WagerResultMapper.read` (`wager-result-mapper.ts`) acrescenta DUPLICATE_REVERSAL aos
 códigos legíveis de rejeição; parâmetros/retorno/freeze/validação estrita são os mesmos
-da seção31. O banco confere se o código é permitido pelo kind da transação. Não há
+da seção 31. O banco confere se o código é permitido pelo kind da transação. Não há
 nova forma de DTO, novo schema_version ou mudança de valores monetários.
 
 ### Fixtures e testes
 
-`infra/test/refund-support.ts::withRefundDatabase(run): Promise<void>` aplica até00007
+`infra/test/refund-support.ts::withRefundDatabase(run): Promise<void>` aplica até 00007
 num banco dwp_test_*, abre ORM app/UOW e executa callback; finally fecha ORM e helper
 externo remove banco. Propaga erros sem tocar principal. `refundInput(walletId:string,
-patch:Partial<WagerInput>={}): WagerInput` deriva fixture BET25.00 e preenche REFUND,
+patch:Partial<WagerInput>={}): WagerInput` deriva fixture BET 25.00 e preenche REFUND,
 IDs refund e referência external-1; patch permite cenários inválidos. Não valida/persiste.
 
 `infra/test/refund-persistence.test.ts::refund(walletId,id='refund')` cria entidade
-REFUND25.00 apontando para external-1, com Money/Clock reais e hash de fixture; retorna
+REFUND 25.00 apontando para external-1, com Money/Clock reais e hash de fixture; retorna
 WagerTransaction ou erro da factory. Callbacks async usam PostgreSQL, retornam void
 via Promise e propagam erros/expect. Quatro testes:
 
-- `REFUND migration up down reapply...`: cria BET terminal e WIN pendente na00006;
+- `REFUND migration up down reapply...`: cria BET terminal e WIN pendente na 00006;
   captura todas as tabelas, sobe, reaplica, desce e sobe; conteúdo deve ser idêntico.
 - `processed refund lookup ignores...`: grava tentativas pendente/rejeitada, consulta
   null; grava REFUND integral com Wallet/ledger/result, consulta entidade. Tenta outro
   PROCESSED sem checagem local e recebe wager_successful_reversal_unique; sem parcial.
 - `REFUND %s requires...`: dois parâmetros PENDING_REFERENCE/REJECTED. Falta de resposta
-  falha no commit; adicionar resposta apropriada confirma. Downgrade recusa55000 e
+  falha no commit; adicionar resposta apropriada confirma. Downgrade recusa 55000 e
   preserva estado. A rejeição usa DUPLICATE_REVERSAL, exercitando mapper e SQL.
 
 Em `wager-concurrency.test.ts`, o wrapper pauseAfterInsert ganhou apenas a delegação
 `findProcessedRefund(id)` ao repositório real para atender à porta ampliada; nenhum
 comportamento concorrente anterior foi trocado por mock.
 
-Validação deste incremento: check completo com494 testes, typecheck/build OK;
-11 testes PostgreSQL (4 novos+7 snapshots anteriores) aprovados, zero falhas.
+Validação deste incremento: check completo com 494 testes, typecheck/build OK;
+11 testes PostgreSQL (4 novos + 7 snapshots anteriores) aprovados, zero falhas.
+
+## 36. REFUND no processador transacional compartilhado
+
+Reembolsar significa registrar um crédito que devolve o débito de uma BET específica.
+A BET e seu ledger continuam intactos para auditoria. Se a abertura foi 100.00, BET 25.00
+levou a 75.00 e uma WIN posterior acrescentou 40.50, o REFUND 25.00 leva a 140.50. Ele não
+substitui o saldo pelo saldo anterior à BET; preserva as outras movimentações. Por isso
+exige referência e valor integral. Aceitar 10.00 de uma BET 25.00 exigiria outro contrato,
+com controle do total parcialmente reembolsado; não é o contrato oficial desta etapa.
+WIN é prêmio, cujo valor pode diferir da BET; ROLLBACK é inversão de operação elegível,
+que pode ser débito ou crédito e continua fora do processador atual.
+
+### Caminho de uma solicitação até o COMMIT
+
+```mermaid
+flowchart TD
+  A[Entrada REFUND com dinheiro em string] --> B[Canonicalização e SHA-256]
+  B --> C[UOW e locks das identidades da nova operação]
+  C --> D{Operação já existe?}
+  D -->|mesmo hash| E[Resposta histórica sem escrever]
+  D -->|conflito| F[Erro de admissão e rollback]
+  D -->|nova| G[Lock da Wallet e leitura da referência por provedor]
+  G --> H[Domínio valida referência e reembolso anterior]
+  H -->|ausente ou BET pendente compatível| I[Pendência + receipt + evento Outbox]
+  H -->|inválida ou duplicada| J[Rejeição + snapshot + evento Outbox]
+  H -->|elegível e dentro do teto| K[Crédito + versão + ledger + status + snapshot + 2 eventos Outbox]
+  K --> L[Constraints diferíveis e COMMIT]
+  I --> L
+  J --> L
+  E --> L
+  L --> M[execute entrega o resultado]
+```
+
+Não há publicação de eventos neste fluxo. Objetos de evento são construídos em memória
+na transação; seus envelopes são inseridos na Outbox e só ficam visíveis após commit.
+Uma falha em qualquer gravação ou constraint diferível reverte o conjunto. O futuro
+publisher lerá registros confirmados para enviar ao SQS; não foi implementado aqui.
+
+### Métodos e dependências
+
+Todos estão em `src/application/wagering/process-wager-transaction.ts`. As assinaturas
+públicas permanecem as mesmas, com WagerInput agora admitindo REFUND. Dependências são
+portas de UOW, Clock e IdGenerator; regras locais são de Money, Wallet e WagerTransaction.
+Nest injeta essa composição já existente, mas o domínio continua sem Nest e MikroORM.
+
+| Método | Parâmetros e retorno | Fluxo, erros, chamadores e decisão |
+|---|---|---|
+| `constructor(unit, ids, clock)` | FinancialUnitOfWork, IdGenerator, Clock; instancia ProcessWagerTransaction | Mantém dependências existentes; não abre SQL nem valida aposta. Composição Nest e factory processor dos testes o chamam. Não ganhou serviço especial de REFUND. |
+| `execute(input)` | WagerInput → Promise<WagerResult> | prepareWager normaliza/valida antes da UOW; unit.run chama process e só resolve após commit. Até três tentativas para RetryableFinancialTransactionError (40P01/40001 traduzidos pela infraestrutura), com nova sessão/entidades e atraso de 10/20 ms fora da transação. Demais erros propagam. Chamado por futuros adaptadores e testes. REFUND 25.00 válido devolve saldo 100.00; replay acrescenta idempotentReplay=true ao DTO histórico. |
+| `processInTransaction(input, repositories)` | WagerInput, FinancialRepositories → Promise<WagerResult> | Prepara e delega process usando a fronteira do chamador; não faz commit nem retry interno. Resultado é provisório até a UOW externa confirmar; seu dono repete a fronteira inteira em erro transitório. Prepara futura Inbox, sem implementá-la. Teste lança erro externo após REFUND e verifica rollback. |
+| `process(prepared, repos)` | PreparedWager, FinancialRepositories → Promise<WagerResult>; privado | Locks de admissão → procura key/hash → retorna receipt ou snapshot compatível no replay → verifica conflito externo → trava Wallet e valida dono/moeda → cria e insere PENDING → busca referência no mesmo provedor → consulta findProcessedRefund somente para REFUND com referência encontrada → chama apply → persiste movimento/lifecycle/eventos/resposta. Chamado pelos dois métodos anteriores. Falta de Wallet, dono/moeda, hash ou externalId conflitante são WagerProcessingError; resposta original ausente é ORIGINAL_RESULT_UNAVAILABLE, sem reconstrução aproximada. SQL, mapper e demais erros propagam e abortam UOW. |
+| `apply(tx, wallet, reference, at, previousRefund)` | WagerTransaction, Wallet, WagerTransaction\|undefined, Date, WagerTransaction\|null → WalletMovementResult\|undefined; privado | WIN usa ledgerDirectionFor; REFUND usa assertRefundAvailable. Traduz REFERENCE_REQUIRED/REFERENCE_NOT_PROCESSED em pendência, INVALID_REFERENCE em rejeição e DUPLICATE_REVERSAL na rejeição homônima. Nenhum desses caminhos movimenta saldo. Referência aprovada passa pelo teto persistível usando Money.add/isLessThan; overflow rejeita DOMAIN_RULE_VIOLATION. Wallet.credit gera ledger/versão, markProcessed grava vínculo interno. Retorna movimento para process persistir. Continua tratando débito BET/saldo insuficiente e LOSS sem movimento como antes. Erros não previstos propagam; não há catch genérico convertendo infraestrutura em regra financeira. |
+
+`previousRefund` não é cache: cada tentativa o lê novamente sob o lock da Wallet. A
+aplicação não repete a lista de vínculos nem compara valores da BET por conta própria;
+a validação está no domínio. O limite de armazenamento continua usando a regra já
+adotada para WIN: 999999999999999999.99, comparação exata, sem float ou arredondamento.
+Dinheiro é Money/string; versões, contadores de tentativas e milissegundos são números.
+
+### Referência, duplicidade e resposta histórica
+
+1. A busca usa `(providerId, referenceExternalTransactionId)`. Um ID encontrado só em
+   outro provedor é ausente neste namespace, portanto aguarda referência.
+2. Se encontrada, o domínio confere BET, player, Wallet, moeda, rodada, valor integral
+   e status. BET válida PENDING aguarda; REJECTED/FAILED ou vínculos incompatíveis
+   rejeitam com INVALID_REFERENCE. Uma BET PENDING com valor incompatível já é inválida:
+   o valor não poderá mudar ao concluir. BET PENDING_REFERENCE é proibida pelo modelo
+   existente; a suíte demonstra a incompatibilidade sem relaxar constraints.
+3. Só depois dessa validação, REFUND anterior PROCESSED implica DUPLICATE_REVERSAL.
+   Uma tentativa rejeitada ou pendente não consome a unicidade de sucesso.
+4. O teto do saldo é verificado antes de creditá-lo. Se o prêmio anterior já levou a
+   carteira ao máximo, REFUND rejeita DOMAIN_RULE_VIOLATION e preserva esse saldo.
+5. A mesma key com mesmo hash retorna a resposta existente; outra key/externalId
+   reembolsando a mesma BET cria uma rejeição auditável. Troca do payload sob a key
+   anterior é conflito, sem novo registro financeiro. O hash inclui a referência.
+
+Exemplo: REFUND-A devolve 25.00 e responde 100.00. REFUND-B da mesma BET é rejeitado com
+saldo 100.00. Outra BET leva a 75.00; replays de A e B ainda retornam 100.00 com os status
+originais. Snapshot é a resposta daquela operação, não uma consulta de saldo atual.
+O novo evento de rejeição pertence a B; replay de B não produz outro evento.
+
+REFUND recebido antes da BET conserva receipt com saldo/versão observados e um evento
+WagerTransactionPendingReference, sem ledger. Quando a BET chegar, redelivery do REFUND
+continua retornando o receipt: execute não funciona como worker. O futuro reprocessador
+precisará travar admissão/Wallet, reler referência e reembolso anterior, aplicar domínio
+e gravar resultado terminal/eventos na mesma UOW. Depois disso o replay lê o snapshot
+terminal, enquanto o receipt original permanece imutável. Um teste faz essa composição
+manualmente para provar compatibilidade; agendamento, seleção e política de tentativas
+ficam pendentes para a etapa do worker.
+
+### Testes funcionais: 29 cenários PostgreSQL
+
+Arquivo `infra/test/refund-functional.test.ts`. Todos os callbacks são chamados pelo
+Bun test e retornam Promise<void>; recebem o parâmetro de test.each quando indicado,
+abrem withRefundDatabase e propagam erros/expect. Dependem dos helpers reais de
+abertura/processamento, wagerState (todas as tabelas) e assertReconciled (saldo/ledger).
+Cada cenário final reconcilia; nenhuma resposta financeira é substituída por mock.
+
+| Teste (prefixo do nome no arquivo) | Parâmetro, lógica e evidência |
+|---|---|
+| `full REFUND of BET %s` (2) | amount:string com 25.00/0.10; abre 100, debita, reembolsa, compara 100/versão 3, referência interna, CREDIT exato e dois eventos não publicados. UNION dos xmin das cinco tabelas retorna um único ID de transação SQL; replay conserva todas as linhas. |
+| `REFUND admission %s` (7) | name:string e patch:Record<string,unknown>; ausência de referência, zero, negativo, teto, carteira inexistente, dono e moeda. Chama entrada inválida, exige throw e estado completo inalterado. Cast WagerInput só constrói entrada hostil em teste. |
+| `REFUND reference %s` (13) | scenario:string; ausência/PENDING/REJECTED/FAILED/WIN/LOSS/REFUND/outro jogador e carteira/outra moeda e carteira/rodada/provedor/parcial/excesso. Monta referência com domínio ou SQL quando ainda PENDING; exige pendência ou INVALID_REFERENCE, saldo/versão inalterados, zero ledger, evento único e replay sem escrita. |
+| `second REFUND identity` (1) | Sem parâmetros; compara original, rejeição duplicada, nova BET, replays históricos e conflitos por valor/referência/key. Garante que rejeição não tem ledger. |
+| `REFUND overflow` (1) | Sem parâmetros; abre no teto, BET de 25.00, WIN 25.00, REFUND 25.00. Rejeita sem movimento/versão adicional, sem arredondar. |
+| `REFUND %s replay survives` (2) | scenario:processed\|pending; grava resultado, movimenta depois, fecha ORM de fato e inicializa outro. Novo processador devolve resultado original sem alterar tabelas; finally fecha nova instância. |
+| `independent providers` (1) | Sem parâmetros; duas iterações com provider-a/provider-b reutilizam keys externas BET/REFUND. Duas operações válidas, cada uma no namespace correto. |
+| `pending REFUND keeps original receipt` (1) | Sem parâmetros; recebe antes da BET, prova replay pendente após chegada e compõe conclusão futura na UOW. Receipt continua versão 1, resultado terminal versão 3 e replay PROCESSED. |
+| `BET cannot be PENDING_REFERENCE` (1) | Sem parâmetros; insertTransaction tenta formato proibido por SQL, expectSqlState exige 23514; saldo reconciliado. |
+
+Callbacks internos relevantes: `unit.run(async repos => ...)` no caso FAILED carrega
+BET PENDING, chama fail e grava snapshot da falha; no caso do worker simulado trava,
+valida, credita, grava lifecycle/ledger/dois eventos e resultado. Recebem repositórios
+transacionais, retornam Promise<void>, propagam erros para rollback. Os callbacks
+map/every dos eventos recebem linhas tipadas e retornam nome/boolean; não fazem I/O.
+Os laços de patches e provedores usam dados fixos, sem IDs aleatórios ocultando falhas.
+
+### Falhas e fronteira de commit: 15 cenários PostgreSQL
+
+Arquivo `infra/test/refund-rollback.test.ts`. Mesmos contratos de callbacks/helpers;
+a injeção ocorre em PostgreSQL real ou no limite externo da UOW, sem remover constraints.
+
+| Teste/auxiliar | Parâmetros, fluxo, retorno, erros e propósito |
+|---|---|
+| `failures` e callback map | readonly [string,string][]; lista cinco tabelas para PROCESSED, três para PENDING e duas para REJECTED. map recebe nome da tabela e retorna tupla. Produz 10 casos, não SQL vindo do usuário. |
+| `REFUND %s rolls back...%s` (10) | scenario/table:string; prepara saldo/referência, instala trigger de falha, executa REFUND e exige P0001, uma tentativa e estado idêntico. Remove somente função de teste com CASCADE, repete com objetos novos e comprova sucesso/rejeição/pendência esperada. |
+| `fail_refund_write(): trigger` | Sem argumentos explícitos, BEFORE INSERT ou UPDATE da tabela escolhida; lança P0001, nunca retorna linha. Na Outbox de sucesso só falha no segundo evento WalletBalanceChanged, provando rollback inclusive do primeiro. Criada/removida exclusivamente no descartável. |
+| `counted.run(work)` | FinancialUnitOfWork.run genérico; incrementa attempts e delega work à UOW real, preservando retorno/erro. Demonstra que P0001 não é retry financeiro. |
+| `REFUND %s waits for deferred commit` (3) | scenario:PROCESSED\|PENDING\|REJECTED. Wrapper corrupt.run primeiro executa work, depois credita 0.01 sem ledger e salva; gate pausa antes do commit. Outra sessão vê estado anterior e promise ainda não respondeu. Liberação causa 23514, estado inteiro reverte. Tentar inserir Wallet escapada na nova UOW falha por ownership; nova execução normal funciona. |
+| `corrupt.run(work)` e callbacks then | run recebe callback transacional e devolve seu resultado só após UOW real; guarda Wallet suja para teste de não reutilização. then marca returned=true apenas no sucesso, handler de erro devolve unknown para inspeção. finally libera barreira mesmo se assertion falhar. Não são implementações alternativas de UOW. |
+| `REFUND retries a full fresh transaction` (1) | Sem parâmetros; instala sequência/triggers, primeira gravação de resultado lança 40001, segunda passa. Confere sequence=2, uma transação REFUND e versão 3, com reconciliação. Testa tradução/retry de SQLSTATE gerado pelo servidor; não simula detecção real de deadlock pelo PostgreSQL. |
+| `retry_refund(): trigger` | BEFORE INSERT do resultado, nextval(refund_attempts)<2 lança 40001, caso contrário RETURN NEW. Sequência não reverte com rollback, permitindo falhar só uma vez; papel app recebe USAGE/SELECT apenas no descartável. |
+| `REFUND processInTransaction participates` (1) | UOW externa recebe repos, processa REFUND e lança Error antes do commit. Resultado era provisório; estado integral é restaurado. Demonstra obrigação de aguardar o commit do dono da fronteira. |
+
+Os erros SQL inesperados são propagados. Não tratamos toda violação UNIQUE como
+DUPLICATE_REVERSAL; só a decisão explícita de domínio vira essa rejeição. O retry
+transitório começa do zero, relê referência e saldo e não reutiliza objetos mutados.
+Validação deste incremento: 44 testes funcionais/rollback, mais 4 de persistência,
+494 unitários, typecheck/build e regressões de 40 BET / 62 WIN-LOSS aprovados sem falhas.

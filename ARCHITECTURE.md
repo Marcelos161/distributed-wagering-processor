@@ -1030,7 +1030,7 @@ recebe evidência persistida do reembolso anterior para decidir duplicidade no d
 A aplicação coordena lookup e persistência da rejeição, sem repetir vínculos/aritmética.
 O índice parcial existente continua a barreira definitiva, inclusive para SQL direto.
 
-Ordem planejada: identidades da nova operação → Wallet → leitura da referência e
+Ordem implementada: identidades da nova operação → Wallet → leitura da referência e
 REFUND processado anterior. Sem locks novos na identidade da referência ou outra Wallet.
 Rejeição DUPLICATE_REVERSAL é outra operação, com evento/snapshot próprios; replay é
 mesma operação e não escreve. Pendência/overflow reutilizam políticas já aprovadas.
@@ -1044,9 +1044,24 @@ impossível; mantemos espera para BET PENDING e ausência da referência.
 Fontes: [índices parciais](https://www.postgresql.org/docs/17/indexes-partial.html),
 [unicidade concorrente](https://www.postgresql.org/docs/17/index-unique-checks.html).
 
-ADR026, persistência:00007 substitui três funções para aceitar/exigir resultados e
+ADR-026, persistência: 00007 substitui três funções para aceitar/exigir resultados e
 receipts REFUND, sem mudar tabelas/índices/bytes antigos. Down protegido recusa dados
-REFUND; sem esses dados restaura00006 preservando WIN/LOSS/BET. Lookup dedicado por
+REFUND; sem esses dados restaura 00006 preservando WIN/LOSS/BET. Lookup dedicado por
 referenceId interno, REFUND e PROCESSED reutiliza índice parcial e mapper. Nenhum lock
 sobre referência é adicionado. Teste SQL contorna verificação local e comprova que o
 índice existente ainda rejeita o segundo reembolso processado.
+
+ADR-026, processamento: o mesmo ProcessWagerTransaction atende REFUND. Depois do lock
+da carteira, lê a referência por provedor e consulta REFUND processado por ID interno.
+assertRefundAvailable valida primeiro vínculos/valor/status, depois duplicidade;
+somente então o processador verifica o teto persistível e chama Wallet.credit. Reusa
+o caminho de lifecycle/ledger/Outbox/snapshot e o retry limitado já aprovado. Receipts
+pendentes não são atualizados nem apagados ao produzir um resultado terminal futuro.
+
+Alternativas descartadas: criar outro processador duplicaria as garantias; travar a
+identidade da referência depois da carteira inverteria a ordem de admissão; tratar
+todo 23505 como DUPLICATE_REVERSAL esconderia erros de outras constraints. Writers
+cooperativos seguem o protocolo de locks; o UNIQUE protege também writers externos,
+mas uma violação SQL inesperada propaga e reverte a unidade inteira, sem fabricar
+uma rejeição de negócio. A API de domínio não consulta o banco nem prova sozinha
+ausência de outro reembolso. Constraints, domínio e coordenação têm papéis distintos.

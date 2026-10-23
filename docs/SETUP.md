@@ -371,3 +371,22 @@ reutilizando bet-worker.ts e suas variáveis DWP_BET_*. São fixtures de teste, 
 entrada HTTP/SQS. Há 20 duplicatas LOSS/pendente e disputas mistas em sessões reais.
 Execute `test:infra` somente depois que todas as suítes de banco terminarem: ele
 reinicia PostgreSQL e recria LocalStack. Os bancos descartáveis são removidos ao final.
+
+### REFUND integral (bancos descartáveis)
+
+```bash
+bun test ./test/refund-contract.test.ts
+bun run test:refund
+```
+
+O segundo comando executa `infra/test/refund-*.test.ts` com PostgreSQL real. Os helpers
+aplicam até `Migration20261023000007` exclusivamente em bancos `dwp_test_*`; removem
+esses bancos e fecham ORMs ao final, inclusive em falhas. Preserve o banco `wagering`:
+não precisa executar `migration:up` nele para validar esta etapa. A migration estende
+as funções de resultados/receipts e não modifica o índice financeiro de reversão.
+O down recusa SQLSTATE 55000 quando existem respostas REFUND, preservando auditoria;
+o teste de reversão sem dados novos conserva os resultados BET/WIN anteriores.
+
+Continue rodando `test:bet` e `test:wager` como regressão, além das suítes anteriores.
+Somente após encerrá-las, execute `test:infra`, que reinicia os containers. O caso de
+uso continua disponível pela composição Nest existente; não há endpoint REFUND.
