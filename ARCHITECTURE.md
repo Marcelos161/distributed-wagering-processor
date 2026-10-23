@@ -578,3 +578,11 @@ somente balance/version/updated_at; não DELETE/TRUNCATE/DDL/alteração de iden
 Ainda não protege saldo contra mudança sem ledger até a migration de integridade.
 Proprietário/migrador continua responsável por DDL; superuser não é fronteira de
 segurança contra adulteração do schema. O papel da aplicação não é administrador.
+
+Segundo incremento ADR-012: wager_transactions entregue com identidade/key únicas
+por provedor, FK composta à wallet, FK nullable à referência interna, CHECKs de
+kind/status/valor/lifecycle/código e trigger BEFORE para inputs/terminais imutáveis e
+referência processada compatível. Referência externa permanece sem FK para aceitar
+ordem de chegada invertida. Índices parciais reservam somente reversões/OPENING
+PROCESSED; índices de pendentes/histórico/referência atendem buscas futuras.
+Não há validação de efeito financeiro no ledger até o terceiro incremento.

@@ -2553,3 +2553,90 @@ Evidência do primeiro incremento: `bun test ./infra/test/financial-wallet.test.
 passou 6 testes/64 expectativas; `DATABASE_URL=... bun run check` passou os 395
 casos existentes, typecheck e build. O valor máximo foi devolvido como string por
 MikroORM real. Não alteramos Money nem aplicamos a migration no banco principal.
+
+### Segunda parte: WagerTransaction persistida
+
+Migration20261023000002 cria wager_transactions com os campos da entidade em snake_case.
+Money é amount + currency; datas são timestamptz(3); referências/falhas opcionais são
+NULL. Uma FK composta para wallets(id,player_id,currency) impede que a mesma wallet
+seja associada a jogador/moeda incompatíveis. O campo reference_external_transaction_id
+é texto sem FK: o provedor pode nomear uma transação que ainda não chegou.
+reference_transaction_id é FK nullable para a transação local e só aparece quando a
+dependente fica PROCESSED; os CHECKs reproduzem a forma de lifecycle do domínio.
+
+PRIMARY KEY, UNIQUE(provider_id,external_transaction_id) e
+UNIQUE(provider_id,idempotency_key) têm funções distintas. A key recebida não é
+regenerada a partir do externalId. Outro provedor pode usar as mesmas strings.
+payload_hash é persistido, mas não calculamos hash/canonicalização nesta etapa.
+A unicidade impede duas linhas com a chave; comparar payload e devolver o resultado
+original continua responsabilidade do futuro caso de uso.
+
+Um **índice parcial** indexa somente linhas que atendem seu WHERE. A UNIQUE
+(reference_transaction_id,kind) aplica-se somente a PROCESSED REFUND/ROLLBACK.
+Assim rejeições não consomem a reversão; duas tentativas concorrentes bem-sucedidas
+do mesmo tipo não podem confirmar. Tipos diferentes continuam permitidos, conforme
+§7.4. Há índice parcial de OPENING processada por wallet para impedir duas aberturas
+positivas. Índices de pendentes (created_at,id), histórico por wallet e referência
+interna servem às futuras consultas; índices únicos já cobrem provedor/externalId/key.
+Não há worker nem política de tentativas/TTL implementados.
+
+Uma **trigger** executa uma função em eventos da tabela. guard_wager_transaction é
+BEFORE INSERT/UPDATE/DELETE por linha. Ela não movimenta dinheiro: impede alteração
+de identidade/input, exclusão, transição inválida e mutação terminal; para conclusão
+com referência, valida que alvo existe, está PROCESSED, tem escopo/kind corretos e
+valor integral quando reversão. WIN pode ter prêmio diferente; gameId não é comparado.
+O alvo deve estar processado antes da conclusão da dependente, inclusive na mesma
+transação SQL. Reidratação posterior não executa UPDATE nem dispara transição.
+
+Transações podem ser inseridas já com um snapshot terminal coerente (por exemplo,
+caso de uso aplica o domínio e persiste seu estado final uma vez). Isso não autoriza
+modificar uma linha terminal existente. Constraints são defesa dos dados, não prova
+de que determinado endpoint autenticou o provedor. OPENING continua reservado ao
+fluxo interno nos futuros adaptadores; um papel SQL autorizado a INSERT não distingue
+HTTP de código interno.
+
+Exemplos com uma wallet e uma BET processada existentes:
+
+```sql
+UPDATE wager_transactions SET status='PENDING' WHERE status='PROCESSED';
+-- 23514: terminal imutável
+UPDATE wager_transactions SET payload_hash='different';
+-- 42501 sob wager_app; coluna não autorizada
+-- Segundo INSERT PROCESSED REFUND da mesma referência: 23505, índice parcial.
+-- REFUND sem referência externa: 23514, wager_reference_shape.
+```
+
+| Função e arquivo | Parâmetros/retorno, fluxo, erros e justificativa |
+|---|---|
+| Migration20261023000002.up — migrations/Migration20261023000002.ts | sem args → Promise<void>; Migrator chama, agenda tabela/FKs/checks/índices/função/trigger/grants; DDL inválido reverte lote; depende de wallets/financial_amount |
+| Migration20261023000002.down — mesmo arquivo | sem args → Promise<void>; remove tabela (e seus índices/trigger), depois função; não remove wallets; perde transações e exige reverter primeiro dependências futuras |
+| guard_wager_transaction — SQL na mesma migration | sem args SQL → trigger; lê TG_OP, OLD/NEW; DELETE dá 23514; UPDATE confere terminal, igualdade do input com to_jsonb excluindo quatro campos de lifecycle, e máquina de estados; PROCESSED resolve referência por PK e valida escopo/kind/valor/status; ausente dá 23503, incompatível 23514; retorna NEW; usa search_path fixo, security invoker, sem UPDATE oculto |
+| insertTransaction — infra/test/financial-schema-support.ts | sql: SQL, patch: Partial<TransactionFixture>={} → Promise<void>; monta fixture determinística PENDING, ou data processada se solicitado, aplica patch e INSERT parametrizado; erros SQL propagam; somente testes chamam, não é caso de uso |
+
+TransactionFixture tipa IDs/hash/kind/status/valores string e nullable referências/
+falha/data. O helper permite strings inválidas deliberadamente para provar rejeição
+no banco. Os valores de teste não passam por Number nem por JSON de domínio alterado.
+
+Testes em infra/test/financial-wager.test.ts, executados por Bun com callback async
+Promise<void>, todos usando withFinancialDatabase até a segunda migration:
+
+| Nome | Entradas, execução e resultado |
+|---|---|
+| wager identities and idempotency are independently unique within each provider | PK/external/key repetidos → 23505; mesmo external/key em outro provider aceito |
+| wager wallet FK binds wallet, player and currency and prevents missing or mismatched owners | wallet ausente, player diferente, moeda USD/JPY contra BRL → 23503 |
+| wager permits unresolved external references while enforcing lifecycle and failure code shape | REFUND pendente sem alvo existe; 15 formas inválidas de kind/status/valor/ref/data/código dão 23514; rejeição final mantém ref interna NULL |
+| wager validates processed references and full reversal amounts through direct SQL | alvo BET25; testa 24.99, provider/rodada/external/status errados (23514), ID interno ausente (23503); REFUND integral e WIN99.99 aceitos; REFUND de WIN recusado |
+| successful reversal uniqueness permits rejected attempts and different reversal kinds | rejeição não bloqueia REFUND válido; segundo sucesso igual dá 23505; ROLLBACK separado funciona |
+| unique reversal index arbitrates genuinely concurrent PostgreSQL insertions | Promise.allSettled envia dois INSERTs reais concorrentes pelo pool; um confirma e outro recebe 23505; consulta confirma um REFUND; não prova cenário distribuído completo |
+| wager transition guard protects identities and terminal rows even with owner SQL privileges | owner não pode alterar input/apagar/atualizar terminal com trigger habilitada; app não pode voltar a PENDING/repetir espera nem alterar hash/TRUNCATE |
+| wager indexes exist and migration down preserves wallet before clean reapplication | consulta pg_indexes, up repetido vazio, down remove só transações, novo up registra duas migrations |
+
+Map callbacks nos testes de concorrência e índices apenas transformam IDs em Promises
+ou linhas em nomes; filter/find selecionam resultados de Promise.allSettled para
+asserções. Nenhum callback substitui a execução PostgreSQL por mock.
+A correspondência transação/ledger e mudança de saldo será fechada na terceira parte.
+
+Evidência do segundo incremento: `bun run test:financial` passou 14 testes (6 Wallet
++ 8 WagerTransaction), 149 expectativas. `DATABASE_URL=... bun run check` passou os
+395 casos existentes, typecheck e build. A disputa real pelo índice retornou um
+sucesso e um SQLSTATE 23505. As tabelas de wagering continuam intocadas.

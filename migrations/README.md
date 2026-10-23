@@ -15,3 +15,8 @@ vazio. Snapshot está desabilitado nesta etapa de SQL revisado manualmente.
 Não use `schema:update`, `schema:fresh` ou `migration:fresh` no banco principal.
 `down` não é backup: remover tabela/coluna pode perder dados. Reversibilidade de
 DDL só é demonstrada nos bancos descartáveis dos testes.
+
+Migration20261023000002 acrescenta wager_transactions, referências, constraints,
+índices e trigger de lifecycle. Seu down preserva wallets; reverta migrations
+posteriores primeiro. Funções SQL ficam versionadas na própria migration para que
+mudanças futuras no domínio TypeScript não alterem o histórico de DDL.

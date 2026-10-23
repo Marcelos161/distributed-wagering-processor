@@ -141,3 +141,8 @@ Etapa 8 autorizada em 23/10/2026, em andamento: usuário aprovou limite monetár
 por triggers diferíveis com versão no ledger. Primeiro incremento: Wallet/DOMAIN,
 constraints e privilégios. WagerTransaction e ledger/integridade virão nos próximos
 commits desta etapa; ainda não são garantias entregues neste incremento.
+
+Segundo incremento da etapa 8: schema de transações, unicidade por provedor,
+referências pendentes/processadas, índices parciais e imutabilidade de input/terminais.
+Validações locais SQL e disputa concorrente do índice testadas; integração com saldo
+materializado e ledger será adicionada no terceiro incremento.

@@ -28,7 +28,7 @@
     "migration:pending": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:pending --config mikro-orm.config.ts",
     "migration:list": "bun --bun node_modules/@mikro-orm/cli/cli.js migration:list --config mikro-orm.config.ts",
     "check": "bun run typecheck && bun run test && bun run build",
-    "test:financial": "bun test ./infra/test/financial-wallet.test.ts"
+    "test:financial": "bun test ./infra/test/financial-wallet.test.ts ./infra/test/financial-wager.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",
