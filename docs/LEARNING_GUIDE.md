@@ -4868,3 +4868,61 @@ Callbacks de testes retornam void, usam expect e falham com assertion/erro inesp
 
 Validação do contrato: `bun run check` passou typecheck,494 testes e build;16 testes
 novos nesta etapa. Nenhum SQL financeiro foi aplicado ao principal.
+
+## 35. Persistência de REFUND e consulta do reembolso anterior
+
+`Migration20261023000007.ts` não cria outra tabela nem altera o índice de reversão.
+Amplia três funções existentes para incluir REFUND nas garantias de resposta histórica.
+As tabelas v1, hashes, valores, dados anteriores, imutabilidade e permissões permanecem.
+
+| Função/SQL | Responsabilidade, parâmetros, fluxo, retorno e erros |
+|---|---|
+| `up(): Promise<void>` | Chamado pelo migrator, enfileira CREATE OR REPLACE das três funções via addSql. DDL transacional; não recebe parâmetros nem faz backfill. Reaplicar migrations não repete alterações. Falhas SQL propagam e revertem a migration. |
+| `check_wager_pending_receipt(): trigger` | BEFORE INSERT recebe NEW; exige WIN ou REFUND pendente, mesma moeda e saldo/versão da carteira sob NO KEY UPDATE. Retorna NEW;23503 para transação inexistente,23514 para inconsistência; CHECKs/PK existentes continuam ativos. |
+| `check_wager_result(): trigger` | Acrescenta REFUND terminal à lista anterior. Valida JSON, vínculo/status/failureCode/moeda, saldo/versão travados; REFUND PROCESSED exige ledger correspondente. Retorna NEW ou23514/23503. A validação de referência/integralidade do ledger continua nas funções financeiras anteriores. |
+| `require_bet_result(): trigger` | Nome legado: no COMMIT consulta estado final; exige resultado de REFUND terminal ou receipt de REFUND pendente, além das regras anteriores. Retorna NULL; falta de resposta causa23514 e rollback completo. |
+| `down(): Promise<void>` | Bloco DO consulta as duas tabelas por kind REFUND e recusa55000 se houver dados novos. Caso contrário restaura exatamente as três funções da00006. Preserva WIN/LOSS/BET e tabelas; testado com snapshots anteriores reais. Não descarta auditoria para facilitar downgrade. |
+
+`WagerTransactionRepository.findProcessedRefund(referenceId: string): Promise<WagerTransaction|null>`
+foi acrescentado em `src/application/ports/financial-persistence.ts`. Adaptador
+`MikroWagerTransactionRepository.findProcessedRefund`, em `wager-transaction-repository.ts`,
+executa SELECT parametrizado por ID **interno** da referência, kind='REFUND' e status='PROCESSED'.
+Reutiliza read, mapper e ownership da sessão; retorna entidade ou null. Não adquire
+lock extra: para decidir um novo movimento, o chamador deve já ter travado Wallet.
+Propaga SQL/mapping/sessão fechada. Rejeições e pendências não ocupam a unicidade;
+a consulta não considera outro tipo nem outro ID de referência. Alternativa de
+listar todos os movimentos para filtrar em memória seria mais cara e menos clara.
+
+`WagerResultMapper.read` (`wager-result-mapper.ts`) acrescenta DUPLICATE_REVERSAL aos
+códigos legíveis de rejeição; parâmetros/retorno/freeze/validação estrita são os mesmos
+da seção31. O banco confere se o código é permitido pelo kind da transação. Não há
+nova forma de DTO, novo schema_version ou mudança de valores monetários.
+
+### Fixtures e testes
+
+`infra/test/refund-support.ts::withRefundDatabase(run): Promise<void>` aplica até00007
+num banco dwp_test_*, abre ORM app/UOW e executa callback; finally fecha ORM e helper
+externo remove banco. Propaga erros sem tocar principal. `refundInput(walletId:string,
+patch:Partial<WagerInput>={}): WagerInput` deriva fixture BET25.00 e preenche REFUND,
+IDs refund e referência external-1; patch permite cenários inválidos. Não valida/persiste.
+
+`infra/test/refund-persistence.test.ts::refund(walletId,id='refund')` cria entidade
+REFUND25.00 apontando para external-1, com Money/Clock reais e hash de fixture; retorna
+WagerTransaction ou erro da factory. Callbacks async usam PostgreSQL, retornam void
+via Promise e propagam erros/expect. Quatro testes:
+
+- `REFUND migration up down reapply...`: cria BET terminal e WIN pendente na00006;
+  captura todas as tabelas, sobe, reaplica, desce e sobe; conteúdo deve ser idêntico.
+- `processed refund lookup ignores...`: grava tentativas pendente/rejeitada, consulta
+  null; grava REFUND integral com Wallet/ledger/result, consulta entidade. Tenta outro
+  PROCESSED sem checagem local e recebe wager_successful_reversal_unique; sem parcial.
+- `REFUND %s requires...`: dois parâmetros PENDING_REFERENCE/REJECTED. Falta de resposta
+  falha no commit; adicionar resposta apropriada confirma. Downgrade recusa55000 e
+  preserva estado. A rejeição usa DUPLICATE_REVERSAL, exercitando mapper e SQL.
+
+Em `wager-concurrency.test.ts`, o wrapper pauseAfterInsert ganhou apenas a delegação
+`findProcessedRefund(id)` ao repositório real para atender à porta ampliada; nenhum
+comportamento concorrente anterior foi trocado por mock.
+
+Validação deste incremento: check completo com494 testes, typecheck/build OK;
+11 testes PostgreSQL (4 novos+7 snapshots anteriores) aprovados, zero falhas.

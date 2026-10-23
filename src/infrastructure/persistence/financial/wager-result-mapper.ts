@@ -30,7 +30,7 @@ export class WagerResultMapper {
     MoneyMapper.toRecord(money); // Same storage cap as every financial record.
     const failure = 'failureCode' in p ? p.failureCode : undefined;
     if (!(([WagerTransactionStatus.Processed, WagerTransactionStatus.PendingReference].some(status => status === p.status) && !('failureCode' in p))
-      || (p.status === WagerTransactionStatus.Rejected && [FailureCode.InsufficientFunds, FailureCode.DomainRuleViolation, FailureCode.InvalidReference, FailureCode.ReferenceNotFound].some(code => code === failure))
+      || (p.status === WagerTransactionStatus.Rejected && [FailureCode.InsufficientFunds, FailureCode.DomainRuleViolation, FailureCode.InvalidReference, FailureCode.ReferenceNotFound, FailureCode.DuplicateReversal].some(code => code === failure))
       || (p.status === WagerTransactionStatus.Failed && failure === FailureCode.PermanentInfrastructureFailure))
       || Object.keys(p).length !== (failure === undefined ? 3 : 4) || Object.keys(p.balance).length !== 2
       || money.toJSON().amount !== p.balance.amount

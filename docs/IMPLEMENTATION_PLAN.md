@@ -284,3 +284,8 @@ local de duplicidade por evidência persistida. Sem alterar hashes anteriores ou
 ativar ROLLBACK. Repositório, snapshots e processamento transacional virão a seguir.
 Interação futura REFUND/ROLLBACK exige decisão antes da etapa16, preservando índice
 por referência/tipo e evitando supor proteção cruzada que ele não oferece.
+
+Segundo incremento REFUND: migration00007 compatível, lookup do reembolso processado
+e mapper de DUPLICATE_REVERSAL. Quatro testes PostgreSQL reais de preservação/up/down,
+respostas obrigatórias, lookup e proteção definitiva por UNIQUE. Integração no caso de
+uso e provas de concorrência ainda serão concluídas nesta autorização.

@@ -1043,3 +1043,10 @@ para impor uma interpretação adicional. BET PENDING_REFERENCE é estruturalmen
 impossível; mantemos espera para BET PENDING e ausência da referência.
 Fontes: [índices parciais](https://www.postgresql.org/docs/17/indexes-partial.html),
 [unicidade concorrente](https://www.postgresql.org/docs/17/index-unique-checks.html).
+
+ADR026, persistência:00007 substitui três funções para aceitar/exigir resultados e
+receipts REFUND, sem mudar tabelas/índices/bytes antigos. Down protegido recusa dados
+REFUND; sem esses dados restaura00006 preservando WIN/LOSS/BET. Lookup dedicado por
+referenceId interno, REFUND e PROCESSED reutiliza índice parcial e mapper. Nenhum lock
+sobre referência é adicionado. Teste SQL contorna verificação local e comprova que o
+índice existente ainda rejeita o segundo reembolso processado.

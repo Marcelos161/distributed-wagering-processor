@@ -14,6 +14,8 @@ export interface WalletRepository {
 }
 
 export interface WagerTransactionRepository {
+  /** Query after locking the wallet; the unique index remains authoritative. */
+  findProcessedRefund(referenceId: string): Promise<WagerTransaction | null>;
   findById(id: string): Promise<WagerTransaction | null>;
   findByExternalId(providerId: string, externalId: string): Promise<WagerTransaction | null>;
   findByIdempotencyKey(providerId: string, key: string): Promise<WagerTransaction | null>;
