@@ -3358,3 +3358,37 @@ desses workers está implementado; não confundir transições de objeto com aut
 void testam Inbox receber/processar/rehidratar/datas/erros; Outbox identidade/publicação/
 imutabilidade; 15 falhas com intervalos exatos e teto; reidratação sem incremento e
 rejeição de envelope/lifecycle divergente. Exceptions/assertions falham testes, sem mocks.
+
+## 22. Schema persistente de mensagens
+
+`migrations/Migration20261023000004.ts`: `up():Promise<void>` agenda SQL via addSql,
+criando funções, tabelas, índice, triggers e grants; `down():Promise<void>` remove só
+as duas tabelas/funções novas. Chamados pelo Migrator oficial; falhas causam rollback
+de DDL. Down apaga mensagens, portanto testes apenas em banco descartável. Nenhuma
+migration financeira anterior foi alterada.
+
+| Operação SQL criada | Parâmetros/retorno, fluxo, motivo e erros |
+|---|---|
+| message_json_id | jsonb→boolean; string não vazia/sem espaços/controle; COALESCE false evita NULL passar como CHECK válido. Usada no envelope. |
+| message_json_money | jsonb→boolean; objeto com amount string/regex2casas/moeda suportada; cast financial_amount confere teto/escala; exceção de conversão/constraint vira false. Não arredonda. |
+| valid_integration_payload | jsonb→boolean; valida objeto/envelope v1/UTC/IDs/data; valida Money, tipo/estado; BalanceChanged confere moeda/equação/versão segura; demais eventos conferem kind/zeroLOSS/failure/referência necessária. Chamado pelo CHECK. Não tenta reaplicar domínio nem buscar transação financeira. |
+| inbox_messages | PK composta; hash obrigatório; datas finitas e processed≥received; INSERT duplicado gera23505, não compara hash automaticamente. Comparação semântica ocorrerá no repositório. |
+| outbox_messages | PK id, JSONB CHECK, espelho de id/agregado/tipo/data, attempts int32≥0, agendamento coerente, published sem next. Identidade única do evento, sem confundir tentativas com novos eventos. |
+| outbox_due_idx | índice parcial dos pendentes, chave de vencimento/occurred/id; suporta busca ordenada e futura disputa SKIP LOCKED. Não é mutex global. |
+| guard_message_state | trigger→NEW; UPDATE Inbox só null→processed e identidade intacta; Outbox só retry(attempts+1/next avança) ou publicação(attempts igual/next null), terminal imutável. DELETE/TRUNCATE recusados23514. App sem essas permissões falha42501 antes. |
+| grants/revokes | app SELECT/INSERT e UPDATE somente processed_at ou attempts/next/published; executa helpers usados nos CHECKs, não recebe DDL. Funções sem SECURITY DEFINER; search_path fixo. |
+
+Persistir evento JSON não garante que alguém o publicou. Não existe FK polimórfica
+nem trigger que obrigue Outbox para todo SQL financeiro: futuros casos de uso precisam
+chamar os cinco repositórios dentro de run. Atomicidade impedirá que falha nessa unidade
+confirme apenas parte do conjunto. Administrador com poder de DDL não é adversário
+contido pelos grants do usuário app.
+
+`infra/test/messaging-schema.test.ts`: três callbacks async sem parâmetros→Promise<void>.
+Primeiro aplica/up sem pendências/down até00003/reaplica, preservando tabela wallets.
+Segundo prova PK por consumidor, colisão/hash imutável/transição terminal e permissões.
+Terceiro usa helper local insert(value:unknown,id='event')→Promise de INSERT; testa
+JSON faltante/versão inválida/amount number/escala inválida/espelho divergente/duplicação,
+retry/publicação e proibição de alterar payload ou truncar. Usa app.json(value) no
+cliente Bun: JSON.stringify seguido de inferência JSONB duplicava a codificação; o
+CHECK rejeitou corretamente o escalar e a fixture foi corrigida. Todos usam PG real.

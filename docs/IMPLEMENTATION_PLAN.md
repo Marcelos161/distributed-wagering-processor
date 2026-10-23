@@ -196,3 +196,7 @@ transacional das mensagens, com testes descartáveis.
 Segundo incremento: InboxMessage/OutboxMessage encapsulados, envelope validado,
 retry1s→5min sem descarte automático (aprovado), datas defensivas e transições testadas.
 Persistência entre instâncias ainda depende das tabelas/repositórios seguintes.
+
+Terceiro incremento: migration00004 Inbox/Outbox, unicidade, validação JSONB, índice de
+pendentes, lifecycle e permissões. Up/down/reaplicação testados em banco descartável;
+principal preservado. Repositórios/unidade compartilhada serão validados a seguir.

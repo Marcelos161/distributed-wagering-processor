@@ -747,3 +747,21 @@ reproduzíveis; futura política operacional pode evoluir explicitamente. Publis
 terminal, limpa nextAttemptAt; retry exige evento pendente e devido. Limite do atraso
 reduz pressão sem abandonar evento; não implementa DLQ do broker. Rehydrate valida
 estrutura, não executa retry/publicação/transições novamente.
+
+## ADR-018 — Schema de mensagens
+
+Migration00004 adiciona Inbox PK(consumer_name,message_id) e Outbox PK(id=eventId).
+JSONB exige envelope v1 conhecido, IDs, timestamp UTC, tipos/status por evento, Money
+string escala2/moeda/teto e equação quando BalanceChanged. Não usa float. Colunas
+espelham envelope; checks recusam lifecycle incoerente. Guardas mantêm identidades/
+payload imutáveis e estados finais terminais, inclusive sob DML do owner; app só pode
+SELECT/INSERT e UPDATE das colunas de lifecycle. Retenção/delete fica para decisão
+futura: nenhuma limpeza automática de Inbox que permita replay antigo.
+
+Índice parcial outbox_due_idx em COALESCE(next_attempt_at,occurred_at),occurred_at,id
+para published_at NULL permite seleção futura ordenada com FOR UPDATE SKIP LOCKED.
+Não há publisher/claim implementado. Não adicionamos FK polimórfica para aggregateId
+nem exigência retroativa de evento em todas as transações antigas. Atomicidade é
+fornecida pela unidade compartilhada **quando o chamador inclui os eventos**; validar
+a semântica dos fatos corresponde às factories/casos de uso, não a um JOIN genérico
+no CHECK JSONB. Isso preserva os contratos/migrations financeiros anteriores.
