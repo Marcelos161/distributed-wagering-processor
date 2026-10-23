@@ -192,3 +192,7 @@ Etapa eventos/Inbox/Outbox autorizada: primeiro incremento implementa quatro eve
 v1 e envelope abstrato imutável. OPENING/aggregateId aprovados; nenhum publisher ou
 consumer iniciado. Próximos incrementos desta autorização: modelos, schema e integração
 transacional das mensagens, com testes descartáveis.
+
+Segundo incremento: InboxMessage/OutboxMessage encapsulados, envelope validado,
+retry1s→5min sem descarte automático (aprovado), datas defensivas e transições testadas.
+Persistência entre instâncias ainda depende das tabelas/repositórios seguintes.

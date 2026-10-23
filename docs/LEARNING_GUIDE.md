@@ -3316,3 +3316,45 @@ recusadas, BalanceChanged/imutabilidade/datas, contexto/causationId e cópia JSO
 sem perda. Todos retornam void e lançam assertion em divergência. Nenhuma dependência
 Nest/ORM é importada pelo domínio. Exemplo: crédito10.00 BRL gera payload com
 `money:{amount:"10.00",currency:"BRL"}`, nunca uma instância Money ou valor binário.
+
+## 21. Modelos de Inbox e Outbox
+
+Inbox é recibo persistente de uma mensagem para um consumidor; Outbox é a intenção
+persistente de publicar um evento. As duas participam da mesma transação dos efeitos.
+At-least-once significa entrega uma ou mais vezes: ack pode falhar depois do commit,
+ou o publisher pode morrer depois de enviar e antes de marcar published. eventId deve
+permanecer estável; não alegamos publication exactly-once. DLQ é fila para mensagens
+que exigem investigação após falhas; não é a tabela Outbox nem descarta sua pendência.
+
+Arquivos em `src/domain/messaging`, sem Nest/ORM. Métodos são síncronos; os modelos
+são chamados pelos futuros casos de uso e pelos mappers/testes nesta etapa:
+
+| Método | Contrato e passos / erros |
+|---|---|
+| event-envelope.ts/validateEnvelope | IntegrationEventJSON<unknown>→void; exige JSON puro, IDs, versão1, timestamp UTC canônico, tipo conhecido, dados/money e aggregateId compatíveis; verifica estado/rejeição/referência e equação de saldo. TypeError/MoneyError/RangeError em dados inválidos. Não publica nem consulta entidades. |
+| InboxMessage.constructor privado | InboxMessageState, token→instância; valida IDs/hash/datas e processedAt≥receivedAt, guarda epoch, congela superfície. Token impede bypass runtime da factory. |
+| InboxMessage.receive | ReceiveInboxProps→InboxMessage; nasce não processada, ignora processedAt extra; não consulta banco. |
+| InboxMessage.rehydrate | InboxMessageState→InboxMessage; preserva snapshot e processedAt sem repetir markProcessed. |
+| receivedAt/processedAt getters | ()→Date/Date\|undefined; cópias defensivas do epoch. |
+| InboxMessage.isProcessed | ()→boolean; verifica presença do instante final. |
+| InboxMessage.markProcessed | at:Date→void; valida instante, recusa repetição e tempo anterior ao recebimento, altera só campo privado. |
+| InboxConflictError.constructor | ()→erro com code INBOX_PAYLOAD_CONFLICT; identifica conflito de conteúdo, não replay. Futuro repositório o utiliza. |
+| OutboxMessage.constructor privado | OutboxMessageState,token→instância; valida envelope/espelho id,agregado,tipo,data, attempts inteiro0..2147483647 e shape do agendamento/publicação; copia/congela payload. Não recalcula backoff reidratado. |
+| OutboxMessage.enqueue | IntegrationEvent<unknown>→OutboxMessage; id=eventId, payload=toJSON, attempts0 e sem agendamento/publicação. Não gera nova identidade. |
+| OutboxMessage.rehydrate | OutboxMessageState→OutboxMessage; reconstrói inclusive retry/publicado, sem executar transição. |
+| occurredAt/nextAttemptAt/publishedAt getters | ()→Date ou undefined defensivas; attempts getter retorna contador de falhas, nunca valor monetário. |
+| OutboxMessage.isPending | ()→boolean; publishedAt ausente. |
+| OutboxMessage.isDue | now:Date→boolean; pendente e now≥nextAttemptAt ou occurredAt. Relógio explícito permite testes determinísticos. |
+| OutboxMessage.markPublished | at:Date→void; exige devido/pendente, preenche publishedAt e limpa próximo retry; erro se terminal/cedo. Chamado somente após futura confirmação do broker. |
+| OutboxMessage.scheduleRetry | now:Date→void; exige devido e contador disponível, calcula min(1000×2^attempts,300000)ms, valida Date futura antes de mutar; incrementa contador e agenda. Limita expoente para impedir overflow. Não descarta nem publica. |
+
+Exemplo: falhas às12:00:00,12:00:01,12:00:03 agendam12:00:01,12:00:03,12:00:07.
+Após muitas falhas, intervalo fica5min. Um evento publicado não volta a pendente.
+Falha de negócio: futura transação rejeitada + evento + ack após commit. Indisponibilidade
+transitória: rollback/retry. Payload inválido permanente: política futura de DLQ. Nenhum
+desses workers está implementado; não confundir transições de objeto com automação.
+
+`test/message-models.test.ts`: helper event() cria LOSS PROCESSED v1; quatro callbacks
+void testam Inbox receber/processar/rehidratar/datas/erros; Outbox identidade/publicação/
+imutabilidade; 15 falhas com intervalos exatos e teto; reidratação sem incremento e
+rejeição de envelope/lifecycle divergente. Exceptions/assertions falham testes, sem mocks.

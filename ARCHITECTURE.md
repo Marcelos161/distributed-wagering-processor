@@ -731,3 +731,19 @@ Factories recebem entidades no estado correspondente e contexto explícito, sem 
 IDs/datas. Tipos e version=1 pertencem às classes. Money vira MoneyProps; payload e
 serialização são cópias recursivamente congeladas, Date é defensiva. Integração não
 significa publicação: as classes apenas descrevem fatos para posterior persistência.
+
+## ADR-017 — Lifecycle da Inbox/Outbox
+
+Aprovado: Inbox deduplica consumerName/messageId, compara hash e só considera replay
+quando processedAt existe; registro ainda pendente é retomado sob lock. Não equivale
+a idempotencyKey financeira. Hash é calculado pelo futuro consumidor confiável sobre
+conteúdo canônico, não recebido como prova do remetente. O domínio recebe hash opaco
+como os contratos existentes; algoritmo de admissão completo continua pendente.
+
+Outbox usa eventId como id, envelope imutável, tentativas como **falhas de publicação**,
+backoff determinístico1s×2^falhas anteriores, teto5min. Não descarta evento por limite
+de tentativas; contador int32 recusa overflow. Sem jitter nesta etapa para testes
+reproduzíveis; futura política operacional pode evoluir explicitamente. Published é
+terminal, limpa nextAttemptAt; retry exige evento pendente e devido. Limite do atraso
+reduz pressão sem abandonar evento; não implementa DLQ do broker. Rehydrate valida
+estrutura, não executa retry/publicação/transições novamente.
