@@ -4808,3 +4808,63 @@ fluxo, mediante autorização. O reprocessador de pendências precisará de pol�
 própria de tentativas/TTL; continua pendente junto com HTTP, consumidores, publishers,
 autenticação e observabilidade operacional. Não confundir os eventos na Outbox com
 publicação realizada ou os testes multiprocesso com um consumer implementado.
+
+## 34. REFUND: contrato e decisão de domínio sobre duplicidade
+
+REFUND devolve integralmente o valor de uma BET processada. Exemplo:100.00 menos BET25.00
+é75.00; REFUND25.00 restaura100.00, deixando dois lançamentos auditáveis em vez de apagar
+a aposta. WIN paga um prêmio independente; ROLLBACK inverte uma operação elegível
+(BET/WIN/REFUND), mas ainda não é processado pelo caso de uso. Reembolso parcial não
+faz parte do contrato, portanto10.00 sobre BET25.00 é referência inválida.
+
+Auditoria: índice parcial `wager_successful_reversal_unique` já garante unicidade de
+(reference_transaction_id,kind) para PROCESSED REFUND/ROLLBACK. Não será substituído
+por unicidade global da referência. Para a futura interação entre tipos, esse índice
+sozinho permitiria REFUND(BET) e ROLLBACK(BET), ambos créditos; antes de implementar
+ROLLBACK será necessário decidir explicitamente quais sequências de reversão aceitar,
+sem afirmar que o índice atual elimina esse risco entre tipos. Esta etapa só REFUND.
+BET em PENDING_REFERENCE é impossível nas regras atuais: BET não recebe referência,
+e aquele status exige referência. BET PENDING é o estado de espera alcançável.
+
+### Funções do primeiro incremento
+
+- `prepareWager(input: WagerInput): PreparedWager`, em `src/application/wagering/prepare-wager.ts`:
+  passa a aceitar REFUND positivo e exigir referência externa válida, diferente do próprio
+  externalId. Reutiliza assertToken/Money/teto/cópia imutável/SHA-256, na mesma ordem de
+  campos. Sem referência lança InvalidWagerInputError antes de I/O. Dinheiro inválido
+  conserva MoneyError. Chamadores: execute/processInTransaction e testes. Saída mantém
+  input, money, canonicalPayload e payloadHash. Não há alteração nos bytes de BET/WIN/LOSS.
+  Alternativa de canonicalizador separado duplicaria regras; o campo já existia para WIN.
+- `WagerTransaction.assertRefundAvailable(reference: WagerTransaction|undefined,
+  previousRefund: WagerTransaction|null): void`, em `src/domain/wagering/wager-transaction.ts`:
+  consulta local, não muda lifecycle. Primeiro exige estado mutável e kind REFUND;
+  depois delega #assertReference, que já confere identidade, vínculos, valor integral
+  e status PROCESSED. Sem anterior retorna void. Havendo evidência anterior, exige
+  entidade REFUND processada apontando para o ID interno resolvido; evidência errada
+  é TypeError (erro do chamador), não rejeição financeira. Evidência válida lança
+  WagerTransactionError/DUPLICATE_REVERSAL. O processador buscará essa entidade no banco
+  sob lock e decidirá persistir reject(DuplicateReversal). A consulta local não substitui
+  UNIQUE nem promete descobrir registros que o chamador não forneceu. Nenhum ORM no domínio.
+  Outros erros: INVALID_KIND, INVALID_TRANSACTION_STATE e os erros de referência já
+  existentes. Exemplo: refund-b detecta refund-a processado da BET25 e permanece PENDING
+  até o chamador invocar reject. A extensão de WagerTransactionErrorCode só acrescenta
+  DUPLICATE_REVERSAL; a factory de erro mantém construtor/code/name anteriores.
+
+### Testes de contrato e domínio
+
+`test/refund-contract.test.ts::transaction(kind,id,reference?,amount='25.00')` cria
+fixture de domínio com IDs/Clock fixos e Money real; retorna WagerTransaction, sem I/O;
+factory pode lançar os erros de domínio se o teste fornecer estrutura inválida.
+Callbacks de testes retornam void, usam expect e falham com assertion/erro inesperado:
+
+| Teste | Parâmetros e sequência |
+|---|---|
+| `REFUND canonical hash...` | Normaliza00025.00, troca key sem mudar hash; troca referência/kind e exige outro hash; verifica imutabilidade. |
+| `REFUND rejects missing...` | undefined/null/vazio/espaço/self; todos falham antes da persistência. |
+| `REFUND rejects inadmissible...` | zero/negativo/escala3/teto excedido; todos rejeitados. |
+| `refund availability accepts...` | BET processada, nenhum anterior permite; REFUND anterior processado lança DUPLICATE_REVERSAL sem mutar; depois reject torna terminal e proíbe nova consulta mutável. |
+| `refund availability delegates...` | Ausência/PENDING/valor parcial/kind errado/evidência anterior ainda pendente; confere códigos e TypeError. |
+| `%s hash with reference=%s...` | Quatro vetores BET/WIN sem e com referência/LOSS, hashes calculados independentemente com Python hashlib e JSON ordenado. Protegem compatibilidade, além do vetor BET já existente. |
+
+Validação do contrato: `bun run check` passou typecheck,494 testes e build;16 testes
+novos nesta etapa. Nenhum SQL financeiro foi aplicado ao principal.

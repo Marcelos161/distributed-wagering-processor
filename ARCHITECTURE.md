@@ -1021,3 +1021,25 @@ retornam sucesso antes de commit, falhas diferíveis revertem tudo. Regressão c
 678 testes distintos, typecheck/build OK; principal sem tabelas financeiras. Não se
 alega ausência universal de deadlocks: provas cobrem os cenários observados e protocolo
 cooperativo; novos writers precisam manter ordem de locks e constraints.
+
+## ADR-026 — REFUND integral e unicidade por referência/tipo
+
+A etapa autorizada mantém canonicalização, UOW, locks, mappers e eventos existentes.
+Domínio já valida referência BET processada e mesmo valor; assertRefundAvailable
+recebe evidência persistida do reembolso anterior para decidir duplicidade no domínio.
+A aplicação coordena lookup e persistência da rejeição, sem repetir vínculos/aritmética.
+O índice parcial existente continua a barreira definitiva, inclusive para SQL direto.
+
+Ordem planejada: identidades da nova operação → Wallet → leitura da referência e
+REFUND processado anterior. Sem locks novos na identidade da referência ou outra Wallet.
+Rejeição DUPLICATE_REVERSAL é outra operação, com evento/snapshot próprios; replay é
+mesma operação e não escreve. Pendência/overflow reutilizam políticas já aprovadas.
+
+Limite explícito: unicidade é por tipo conforme README, não exclusão cruzada. REFUND(BET)
+e ROLLBACK(BET) cabem em linhas distintas desse índice. A política dessa combinação
+precisa ser discutida antes de habilitar ROLLBACK; não se permite implicitamente esse
+fluxo pelo processador atual, que continua recusando ROLLBACK. Não mudamos constraints
+para impor uma interpretação adicional. BET PENDING_REFERENCE é estruturalmente
+impossível; mantemos espera para BET PENDING e ausência da referência.
+Fontes: [índices parciais](https://www.postgresql.org/docs/17/indexes-partial.html),
+[unicidade concorrente](https://www.postgresql.org/docs/17/index-unique-checks.html).

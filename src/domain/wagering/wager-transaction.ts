@@ -188,6 +188,19 @@ export class WagerTransaction {
     return LedgerDirection.Credit;
   }
 
+  /** Local check over persisted evidence supplied by the caller; SQL remains authoritative. */
+  assertRefundAvailable(reference: WagerTransaction | undefined, previousRefund: WagerTransaction | null): void {
+    this.#assertMutable();
+    if (this.kind !== WagerTransactionKind.Refund) throw new WagerTransactionError('INVALID_KIND', 'Availability check requires REFUND');
+    this.#assertReference(reference);
+    if (previousRefund === null) return;
+    if (!(previousRefund instanceof WagerTransaction) || previousRefund.kind !== WagerTransactionKind.Refund
+      || previousRefund.status !== WagerTransactionStatus.Processed || previousRefund.referenceTransactionId !== reference!.id) {
+      throw new TypeError('Expected a processed REFUND of the resolved reference');
+    }
+    throw new WagerTransactionError('DUPLICATE_REVERSAL', 'This BET already has a processed REFUND');
+  }
+
   #assertMutable(): void {
     if (this.isTerminal()) throw new InvalidTransactionStateError(`Cannot transition terminal ${this.status}`);
   }

@@ -2,7 +2,7 @@ export type WagerTransactionErrorCode =
   | 'INVALID_STATE' | 'INVALID_IDENTIFIER' | 'INVALID_KIND' | 'INTERNAL_ONLY_KIND'
   | 'INVALID_MONEY' | 'INVALID_AMOUNT' | 'INVALID_DATE' | 'INVALID_REFERENCE'
   | 'REFERENCE_REQUIRED' | 'REFERENCE_NOT_PROCESSED' | 'INVALID_FAILURE_CODE'
-  | 'INVALID_TRANSACTION_STATE';
+  | 'INVALID_TRANSACTION_STATE' | 'DUPLICATE_REVERSAL';
 
 export class WagerTransactionError extends Error {
   constructor(public readonly code: WagerTransactionErrorCode, message: string) {

@@ -278,3 +278,9 @@ validados. Principal permanece sem tabelas financeiras; nenhum dwp_test_* remane
 Commits locais, sem push. Próxima etapa recomendada: REFUND e ROLLBACK, após autorização.
 Worker de referências, HTTP, consumers, publishers e políticas operacionais não foram
 iniciados. O desenvolvimento desta etapa foi encerrado.
+
+Etapa REFUND autorizada: primeiro incremento estende entrada canônica e decisão
+local de duplicidade por evidência persistida. Sem alterar hashes anteriores ou
+ativar ROLLBACK. Repositório, snapshots e processamento transacional virão a seguir.
+Interação futura REFUND/ROLLBACK exige decisão antes da etapa16, preservando índice
+por referência/tipo e evitando supor proteção cruzada que ele não oferece.
