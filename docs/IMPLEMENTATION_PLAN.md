@@ -329,10 +329,11 @@ de consumer e publisher. Dez migrations reexecutam e revertem em banco vazio; da
 incompatíveis bloqueiam downgrade. Fase8/9: instalação limpa, documentação e regressão
 integral em fechamento; nenhuma autorização adicional é necessária para concluí-las.
 
-Missão final concluída tecnicamente:792testes distintos, lint/typecheck/build aprovados.
-Instalação limpa sem node_modules compartilhado repetiu494testes, lint e build;
+Missão final concluída tecnicamente: 792 testes distintos, lint/typecheck/build aprovados.
+Instalação limpa sem node_modules compartilhado repetiu 494 testes, lint e build;
 API compilada + três workers reais responderam health/metrics e encerraram com SIGTERM.
 Setup idempotente prepara wagering_demo com dez migrations; principal preservado.
 README oficial intacto, matriz final e guia de execução/documentação de envio prontos.
-Não há próxima funcionalidade autorizada a iniciar. Publicação e formulário dependem
-apenas de destino/dados/autorização externos ainda não fornecidos; nenhum push foi feito.
+Não há próxima funcionalidade autorizada a iniciar. O repositório privado foi publicado
+em `Marcelos161/distributed-wagering-processor`, preservando a `main` e o histórico.
+Convites de avaliadores e formulário dependem de dados externos ainda não fornecidos.

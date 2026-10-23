@@ -1,18 +1,15 @@
 # Preparação para envio
 
-Entrega técnica local validada; **não houve push nem envio de formulário**. Branch
-main, sem remote configurado. Portanto ainda não existe URL remota confirmada para
-informar. Não atribuímos repositório de terceiros ao candidato.
+Entrega técnica publicada em repositório privado do candidato:
+<https://github.com/Marcelos161/distributed-wagering-processor>. A branch `main`
+acompanha `origin/main`. Nenhum formulário ou mensagem de recrutamento foi enviado.
 
 ## Passos para envio
 
-1. Criar repositório na conta do candidato, com visibilidade adequada ao recrutamento.
-2. Conferir proprietário e URL; configurar `git remote add origin <URL_DO_SEU_REPOSITORIO>`.
-3. Conferir `git remote -v`, `git status --short` e `git log --oneline`.
-4. Quando houver autorização para publicar no destino conferido, executar
-   `git push -u origin main`. Não usar force push.
-5. Conferir README, docs e ausência de `.env` no remoto. Compartilhar a URL efetiva.
-6. No formulário oficial confirmado, preencher nome/e-mail reais do candidato,
+1. Obter os nomes de usuário GitHub dos avaliadores e conceder acesso `Read` em
+   **Settings → Collaborators → Add people**, pois o repositório é privado.
+2. Confirmar que cada avaliador consegue abrir a URL acima e visualizar a `main`.
+3. No formulário oficial confirmado, preencher nome/e-mail reais do candidato,
    URL do repositório e resumo abaixo. Revisar e enviar manualmente, ou autorizar
    explicitamente automação com o endereço correto. Esses dados não foram inventados.
 
@@ -22,20 +19,21 @@ informar. Não atribuímos repositório de terceiros ao candidato.
 > MikroORM e SQS em LocalStack. Implementa OPENING, BET, WIN, LOSS, REFUND e ROLLBACK,
 > ledger imutável, idempotência persistente, Inbox/Outbox e referências fora de ordem.
 > A integridade usa transações SQL, locks por carteira e constraints, com API HTTP,
-> consumer, publisher, resolução de pendências e reconciliação. Foram aprovados792
+> consumer, publisher, resolução de pendências e reconciliação. Foram aprovados 792
 > testes distintos, incluindo três processos reais, concorrência, DLQ e crashes nos
 > intervalos críticos de commit/ACK/publicação, além de lint, typecheck e build.
 > Instalação limpa e inicialização dos quatro papéis foram verificadas. O README
 > preserva o enunciado e aponta para um guia reproduzível. Autenticação foi omitida
 > conforme permitido; perfil local, entrega at-least-once e limites do emulador estão
-> documentados. Repositório: [inserir URL própria após publicação].
+> documentados. Repositório:
+> https://github.com/Marcelos161/distributed-wagering-processor
 
 ## COMO DEFENDER ESTE PROJETO NA ENTREVISTA
 
 1. **Dinheiro exato.** Strings no transporte, decimal.js na classe Money e NUMERIC
    com CHECK de escala/faixa. Evita erro binário e arredondamento silencioso de 1.005.
 2. **Lock pessimista por carteira.** O saldo é recurso disputado: ler sob FOR UPDATE
-   faz a segunda BET 80enxergar 20 e ser rejeitada. Carteiras distintas continuam em paralelo.
+   faz a segunda BET 80 enxergar 20 e ser rejeitada. Carteiras distintas continuam em paralelo.
 3. **Unicidade no banco.** Locks organizam a admissão, mas índices impedem identidades
    duplicadas mesmo com outro processo ou SQL direto. FIFO sozinho não protege dinheiro.
 4. **Replay histórico.** A resposta imutável é gravada no commit. Repetir uma BET

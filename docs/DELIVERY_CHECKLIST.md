@@ -22,14 +22,15 @@ A avaliação abaixo não atribui pontos à própria solução nem garante ausê
 | Consumer, Inbox, hash, ACK depois do commit | ConsumeWager + UOW + DeleteMessage | duplicatas, conflitos, falha pré-commit, SIGKILL pós-commit/pré-ACK, redelivery | IMPLEMENTADO E TESTADO |
 | Publisher múltiplo e recuperação | OutboxDispatch lease/token, PublishOutbox, fila events | publisher3, dois processos em distributed, SIGKILL pós-envio/pré-marcação | IMPLEMENTADO E TESTADO |
 | Publicação duplicada segura | eventId estável + Inbox persistente downstream | publisher: duplicata forçada, um efeito e saldo inalterado | IMPLEMENTADO E TESTADO |
-| Referências fora de ordem e expiração | jobs duráveis, SKIP LOCKED, resolver compartilhado | references9: WIN/REFUND/ROLLBACK, TTL, retry, crash/restart | IMPLEMENTADO E TESTADO |
+| Referências fora de ordem e expiração | jobs duráveis, SKIP LOCKED, resolver compartilhado | references 9: WIN/REFUND/ROLLBACK, TTL, retry, crash/restart | IMPLEMENTADO E TESTADO |
 | Reconciliação consistente e diagnóstico | lock Wallet, soma/chain/versões/vínculos, sem UPDATE | API: consistência e corrupção controlada só no descartável | IMPLEMENTADO E TESTADO |
 | JSON logs, IDs, métricas, live/ready | observability, MetricsController, worker-runtime | HTTP/worker health real, counters/gauges, log/recovery tests | IMPLEMENTADO E TESTADO |
 | Migrations e usuário restrito | dez migrations, admin separado, grants explícitos | delivery-migrations2, migrations2, orm2, schema/constraints | IMPLEMENTADO E TESTADO |
 | Instalação limpa e execução local documentada | demo:setup + dois env separados + guia | cópia Git sem node_modules, frozen install, lint/check e quatro papéis reais | IMPLEMENTADO E TESTADO |
 | Opção de omitir autenticação §2 | ProviderIdentityGuard no-op, desenho OIDC documentado | rotas locais, health sem auth; IdP não implementado intencionalmente | IMPLEMENTADO E TESTADO |
 | Histórico Git e preparação do formulário | commits semânticos + SUBMISSION.md | status/remote/diff/arquivos revisados | IMPLEMENTADO E TESTADO |
-| Publicação remota e submissão externa | depende de destino próprio e dados de candidatura | nenhum remote configurado; nenhum envio feito | PENDENTE (administrativo) |
+| Publicação remota | repositório privado `Marcelos161/distributed-wagering-processor` | `origin/main`, HEAD local e API GitHub com o mesmo SHA | IMPLEMENTADO E TESTADO |
+| Acesso de avaliadores e formulário externo | depende dos usuários GitHub e dados de candidatura | nenhum convite, formulário ou mensagem enviado | PENDENTE (administrativo) |
 
 Nenhum requisito técnico obrigatório ficou no estado “IMPLEMENTADO, MAS SEM TESTE
 INTEGRADO”. IdP, OpenTelemetry, dashboard e benchmark de carga são opcionais e não
