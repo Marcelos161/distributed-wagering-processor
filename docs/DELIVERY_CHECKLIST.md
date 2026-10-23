@@ -17,7 +17,7 @@ Os estados abaixo descrevem a auditoria inicial e serão atualizados com evidên
 | Consumer SQS / ACK pós-commit | IMPLEMENTADO E TESTADO | consumer5: fila real, redrive/DLQ, concorrência e processo morto após commit antes do ACK |
 | Publisher Outbox | IMPLEMENTADO E TESTADO | publisher3, leases concorrentes, falha SQS e SIGKILL após envio |
 | Reconciliação pública | IMPLEMENTADO E TESTADO | Caso de uso/endpoint validados com saldo consistente; diagnóstico de divergência será ampliado na fase6 |
-| Observabilidade / readiness | PENDENTE | Liveness/log de startup existentes; falta integração |
+| Observabilidade / readiness | IMPLEMENTADO E TESTADO | HTTP live/ready/metrics, workers health por papel, logs de commit, reconciliação com dano isolado |
 | ≥3 processos financeiros | IMPLEMENTADO E TESTADO | BET/WIN/REFUND; falta cenário completo de transporte/crash |
 | Docker PostgreSQL/SQS | IMPLEMENTADO E TESTADO | Containers healthy; broker local perde mensagens ao recriar |
 | Instalação limpa e entrega final | PENDENTE | Scripts, documentação, testes e revisão final |

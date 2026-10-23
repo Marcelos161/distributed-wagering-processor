@@ -101,7 +101,7 @@ test('CreateWallet separates currencies and rejects a duplicate without changing
   });
 }, 20_000);
 
-test('Nest composes CreateWallet with restricted PostgreSQL UUIDs and system clock without exposing an endpoint', async () => {
+test('Nest composes CreateWallet with restricted PostgreSQL UUIDs and system clock and HTTP validates the required opening contract', async () => {
   await withMessagingDatabase(async ({ applicationUrl, app: sql }) => {
     const previous = process.env['DATABASE_URL'];
     process.env['DATABASE_URL'] = applicationUrl;
@@ -116,7 +116,7 @@ test('Nest composes CreateWallet with restricted PostgreSQL UUIDs and system clo
       expect(row.created_at.getTime()).toBeGreaterThanOrEqual(before);
       expect(row.created_at.getTime()).toBeLessThanOrEqual(Date.now());
       await expectCounts(sql, '1', '1', '1', '2');
-      expect((await fetch(`${await nest.getUrl()}/wallets`, { method: 'POST' })).status).toBe(404);
+      expect((await fetch(`${await nest.getUrl()}/wallets`, { method: 'POST' })).status).toBe(400);
     } finally {
       try { await nest?.close(); } finally {
         if (previous === undefined) delete process.env['DATABASE_URL']; else process.env['DATABASE_URL'] = previous;

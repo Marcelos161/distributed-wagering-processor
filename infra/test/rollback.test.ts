@@ -97,7 +97,7 @@ test('REFUND and ROLLBACK race in independent Bun processes with one compensatio
       expect(count).toBe(2); release.open(); await blocker;
       const reports = await bounded(Promise.all(children.map(async child => {
         const [body, errors, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-        expect(code).toBe(0); expect(errors).toBe(''); return JSON.parse(body) as { pid: number; results: WagerResult[] };
+        expect(code).toBe(0); expect(errors).toBe(''); return JSON.parse(body.trim().split('\n').at(-1)!) as { pid: number; results: WagerResult[] };
       })));
       expect(new Set(reports.map(r => r.pid)).size).toBe(2);
       expect(reports.flatMap(r => r.results).map(r => r.status).sort()).toEqual([Status.Processed, Status.Rejected]);

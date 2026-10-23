@@ -40,3 +40,16 @@ export async function observeWait(sql: SQL, query: string): Promise<void> {
   } while (Date.now() < deadline);
   throw new Error('Expected PostgreSQL wait was not observed');
 }
+
+/** Consume stdout until a real child milestone, tolerating preceding structured logs. */
+export async function readUntil(stream: ReadableStream<Uint8Array>, marker: string): Promise<string> {
+  const reader = stream.getReader(); let text = '';
+  try {
+    while (!text.includes(marker)) {
+      const chunk = await bounded(reader.read());
+      if (chunk.done) throw new Error('Child exited before milestone');
+      text += new TextDecoder().decode(chunk.value);
+    }
+    return text;
+  } finally { reader.releaseLock(); }
+}

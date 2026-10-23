@@ -7,7 +7,7 @@ import { withOperationalDatabase } from './operational-support.js';
 import { withQueues, send, receive } from './queue-support.js';
 import { creator, fundedInput } from './wallet-creation-support.js';
 import { betInput, processor } from './bet-processing-support.js';
-import { assertReconciled, bounded } from './bet-support.js';
+import { assertReconciled, bounded, readUntil } from './bet-support.js';
 function envelope(walletId: string, messageId = 'message', patch: Record<string, unknown> = {}) {
   return { messageId, type: 'WagerTransactionRequested', occurredAt: new Date().toISOString(), data: { ...betInput(walletId), ...patch } };
 }
@@ -57,8 +57,7 @@ test('consumer killed after COMMIT before ACK redelivers safely and real worker 
     const child = Bun.spawn([process.execPath, fileURLToPath(new URL('./consumer-child.ts', import.meta.url))], { env: { ...process.env, DATABASE_URL: applicationUrl, SQS_QUEUE_NAME: name }, stdout: 'pipe', stderr: 'pipe' });
     const errors = new Response(child.stderr).text();
     try {
-      const reader = child.stdout.getReader(); const data = await bounded(reader.read());
-      expect(new TextDecoder().decode(data.value)).toContain('COMMITTED_BEFORE_ACK'); reader.releaseLock();
+      await readUntil(child.stdout, 'COMMITTED_BEFORE_ACK');
       child.kill('SIGKILL'); await bounded(child.exited); expect(await errors).toBe('');
       expect((await app`SELECT balance::text FROM wallets`)[0].balance).toBe('75.00');
       // Wait for a real delivery, then make it visible for the restarted consumer.

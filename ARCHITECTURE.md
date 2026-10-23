@@ -1210,3 +1210,19 @@ processo podem excedê-la, justificando consumidor idempotente. Calls externas n
 mantêm transação financeira nem claim SQL aberta. Falhas incrementam attempts com
 backoff existente1s→5min, sem descarte automático. SIGTERM drena envio atual e fecha
 client/ORM. Down recusa qualquer claim existente; operador deve parar/drain workers.
+
+## ADR-032 — Diagnóstico sem payload financeiro ou segredo
+
+Logs JSON contêm IDs de correlação/mensagem/transação/wallet/provedor/evento quando
+aplicáveis, status e duração. HTTP propaga x-correlation-id validado via AsyncLocalStorage;
+sem header gera UUID. Logs de sucesso financeiro só depois do commit. Counters por
+processo são métricas, nunca fonte de idempotência. GET /metrics agrega counters locais
+com status/backlog/lag do PostgreSQL, locks esperando e DLQ aproximada SQS. Workers
+expõem health/metrics em porta loopback efêmera (ou WORKER_HEALTH_PORT explícita),
+anunciada no JSON started. Ready por papel: SQL para referências, SQL+fila para demais.
+Métricas reiniciam por processo, gauges PostgreSQL são duráveis; scrape por instância.
+A contagem de conexões por worker não substitui health do processo.
+
+Reconciliação foi exercitada com dano deliberado por administrador exclusivamente em
+banco descartável: saldo divergente, ledger removido/lacuna. Resposta denuncia issues
+e diferença sem consertar saldo. Permissão normal app continua incapaz dessas mutações.

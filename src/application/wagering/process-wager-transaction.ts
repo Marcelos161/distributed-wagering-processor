@@ -1,3 +1,4 @@
+import { count, record } from '../observability.js';
 import type { FinancialRepositories, FinancialUnitOfWork } from '../ports/financial-persistence.js';
 import type { Clock, IdGenerator } from '../ports/runtime.js';
 import { RetryableFinancialTransactionError } from '../errors/retryable-financial-transaction-error.js';
@@ -18,11 +19,19 @@ export class ProcessWagerTransaction {
   constructor(private readonly unit: FinancialUnitOfWork, private readonly ids: IdGenerator, private readonly clock: Clock) {}
 
   async execute(input: WagerInput): Promise<WagerResult> {
-    const prepared = prepareWager(input);
+    const prepared = prepareWager(input), started = performance.now();
     for (let attempt = 1; ; attempt++) {
-      try { return await this.unit.run(repos => this.process(prepared, repos)); }
+      try {
+        const result = await this.unit.run(repos => this.process(prepared, repos));
+        count('transactions_' + result.status); if (result.idempotentReplay) count('duplicates');
+        count('processing_duration_ms_sum', performance.now()-started); count('processing_count');
+        record('wager', { transactionId: result.transactionId, walletId: input.walletId, providerId: input.providerId,
+          correlationId: result.transactionId, status: result.status, durationMs: performance.now()-started });
+        return result;
+      }
       catch (error) {
         if (!(error instanceof RetryableFinancialTransactionError) || attempt >= 3) throw error;
+        count('transaction_retries');
         // Bounded backoff outside the transaction: fresh EM/entities/locks on the next attempt.
         await new Promise<void>(resolve => setTimeout(resolve, 10 * attempt));
       }

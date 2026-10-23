@@ -7,7 +7,7 @@ import { sqsClient } from '../../src/infrastructure/messaging/sqs-connection.js'
 import { withOperationalDatabase } from './operational-support.js';
 import { withQueues, receive } from './queue-support.js';
 import { creator, fundedInput } from './wallet-creation-support.js';
-import { assertReconciled, bounded } from './bet-support.js';
+import { assertReconciled, bounded, readUntil } from './bet-support.js';
 import { createHash } from 'node:crypto';
 
 test('two publishers claim disjoint events, send real SQS and mark only after confirmation', async () => {
@@ -52,7 +52,7 @@ test('publisher SIGKILL after broker send recovers lease; duplicate eventId is s
     const child = Bun.spawn([process.execPath, fileURLToPath(new URL('./publisher-child.ts', import.meta.url))], { env: { ...process.env, DATABASE_URL: applicationUrl, SQS_EVENT_QUEUE_NAME: name }, stdout: 'pipe', stderr: 'pipe' });
     const errors = new Response(child.stderr).text();
     try {
-      const reader = child.stdout.getReader(); expect(new TextDecoder().decode((await bounded(reader.read())).value)).toContain('PUBLISHED_BEFORE_MARK'); reader.releaseLock();
+      await readUntil(child.stdout, 'PUBLISHED_BEFORE_MARK');
       child.kill('SIGKILL'); await bounded(child.exited); expect(await errors).toBe('');
       expect((await app`SELECT count(*)::text n FROM outbox_messages WHERE published_at IS NOT NULL`)[0].n).toBe('0');
       const publisher = new PublishOutbox(new OutboxDispatch(appOrm, 60000), client, name, 'commands');

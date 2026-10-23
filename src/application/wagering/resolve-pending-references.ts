@@ -1,3 +1,4 @@
+import { count, record } from '../observability.js';
 import type { FinancialUnitOfWork } from '../ports/financial-persistence.js';
 import type { Clock } from '../ports/runtime.js';
 import type { ProcessWagerTransaction } from './process-wager-transaction.js';
@@ -10,7 +11,7 @@ export class ResolvePendingReferences {
     if (policy.maxDelayMs < policy.initialDelayMs || policy.maxAttempts > 1000000) throw new Error('Invalid reference retry bounds');
   }
   async runOne(): Promise<boolean> {
-    return this.unit.run(async repos => {
+    const worked = await this.unit.run(async repos => {
       const now = this.clock.now(), job = await repos.pendingReferences.claimDue(now);
       if (!job) return false;
       const expire = job.attempts + 1 >= this.policy.maxAttempts || now.getTime() - job.createdAt.getTime() >= this.policy.ttlMs;
@@ -22,5 +23,7 @@ export class ResolvePendingReferences {
       }
       return true;
     });
+    if (worked) { count('reference_checks'); record('reference_worker', { status: 'COMMITTED' }); }
+    return worked;
   }
 }

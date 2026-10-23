@@ -15,8 +15,8 @@ async function bootstrap(): Promise<void> {
   }
 }
 
-void bootstrap().catch((error: unknown) => {
+void bootstrap().catch(() => {
   const logger = new ConsoleLogger('Bootstrap', { json: true });
-  logger.error(error instanceof Error ? error.message : 'Unknown startup failure');
+  logger.error('Application startup failed; verify local configuration and dependencies');
   process.exitCode = 1;
 });

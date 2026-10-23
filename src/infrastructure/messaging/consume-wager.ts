@@ -1,3 +1,4 @@
+import { count, record } from '../../application/observability.js';
 import { createHash } from 'node:crypto';
 import { ReceiveMessageCommand, DeleteMessageCommand, ChangeMessageVisibilityCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import type { FinancialUnitOfWork } from '../../application/ports/financial-persistence.js';
@@ -34,21 +35,30 @@ export class ConsumeWager {
         ['providerId','externalTransactionId','idempotencyKey','playerId','walletId','roundId','gameId','kind','money']);
       const input = wagerInput(data, data.idempotencyKey, 'sqs');
       const hash = createHash('sha256').update(JSON.stringify({ type: envelope.type, key: input.idempotencyKey, business: prepareWager(input).canonicalPayload })).digest('hex');
+      const started = performance.now();
+      let replay = false;
+      let transactionId: string | undefined, outcomeStatus: string | undefined;
       await this.unit.run(async repos => {
         const received = await repos.inbox.receive({ messageId, consumerName: this.options.consumerName, payloadHash: hash, receivedAt: this.clock.now() });
-        if (received.disposition === 'processed') return;
-        await this.process.processInTransaction(input, repos);
+        if (received.disposition === 'processed') { replay = true; return; }
+        const outcome = await this.process.processInTransaction(input, repos); transactionId = outcome.transactionId;
+        outcomeStatus = outcome.status;
         received.message.markProcessed(this.clock.now()); await repos.inbox.save(received.message);
       });
+      if (outcomeStatus) count('consumer_transactions_' + outcomeStatus);
+      count('consumer_commits'); if (replay) count('inbox_duplicates');
+      record('consumer_commit', { ...(transactionId === undefined ? {} : { transactionId }), messageId, providerId: input.providerId, walletId: input.walletId,
+        correlationId: messageId, status: replay ? 'REPLAY' : 'COMMITTED', durationMs: performance.now()-started });
       clearInterval(heartbeat); await extending;
       // Resolving unit.run includes deferred constraints and COMMIT. No ACK exists inside the callback.
       await this.client.send(new DeleteMessageCommand({ QueueUrl: url, ReceiptHandle: message.ReceiptHandle }));
       return true;
     } catch (error) {
+      count('consumer_retries');
       clearInterval(heartbeat); await extending;
-      const count = Number(message.Attributes?.['ApproximateReceiveCount'] ?? '1');
+      const receives = Number(message.Attributes?.['ApproximateReceiveCount'] ?? '1');
       await this.client.send(new ChangeMessageVisibilityCommand({ QueueUrl: url, ReceiptHandle: message.ReceiptHandle,
-        VisibilityTimeout: Math.min(300, this.options.retrySeconds * 2 ** Math.min(count - 1, 8)) })).catch(() => {});
+        VisibilityTimeout: Math.min(300, this.options.retrySeconds * 2 ** Math.min(receives - 1, 8)) })).catch(() => {});
       throw error; // Invalid/conflicting messages also remain unacked: broker redrive policy owns the DLQ.
     } finally { clearInterval(heartbeat); }
   }

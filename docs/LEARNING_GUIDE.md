@@ -5410,3 +5410,36 @@ marca publicação e entrega duplicata forçada com eventId idêntico a Inbox do
 proxy send aguarda SDK real antes de SIGSTOP; pai mata o processo. Helpers de fila
 existentes fazem isolamento/limpeza. Contagens e saldo reconciliado são assertados,
 sem dinheiro alterado pelo publisher. Typecheck e3testes/23assertions aprovados.
+
+## 43. Logs, métricas e diagnóstico de reconciliação
+
+`application/observability.ts`: correlation é AsyncLocalStorage<string> de contexto;
+count(name,amount=1):void incrementa contador local; metrics():Readonly<Record> faz
+snapshot; record(operation,fields):void escreve JSON allowlist com IDs/status/duração,
+sem body/erro cru/connection string. Chamadores são API, processador e workers; nenhum
+cálculo monetário usa counters. Middleware de createApplication mede finish, conta HTTP
+por status e propaga correlação. execute mede duração/apostas/replays após UOW; UOW
+conta40P01/40001 reais antes de traduzir retry; consumer/publisher/resolver contam
+commits/retries, sem usar métricas para decidir negócio.
+
+`MetricsController.constructor/read` recebe ORM, SELECTs agregam status, backlog/lag,
+pendências, locks e conexões worker; SDK consulta DLQ e fecha no finally. Retorna JSON
+operacional; falhas propagam para filter sanitizado. `worker-runtime.runWorker` cria
+Bun.serve loopback, porta0ou WORKER_HEALTH_PORT, callback fetch atende live/ready/metrics;
+ready recusa quando stopping e consulta dependências do papel. Finally para health.
+Logs de startup da API e workers não imprimem exception bruta.
+
+`api.test.ts` ganhou2testes: owner desativa triggers só no descartável para alterar
+saldo/remover ledger; endpoint reporta BALANCE_DIFFERENCE, VERSION_GAP, BALANCE_CHAIN,
+MISSING_LEDGER e não reescreve dados. GET /metrics mostra contador/gauges. Helpers
+readUntil(stream,marker):Promise<string> em bet-support drenam stdout até marco real
+com timeout, tolerando logs anteriores; filhos multiprocesso agora parseiam última
+linha do relatório, preservando logs de produção. Não se desativou observabilidade
+para fazer testes passarem. check494, API5, consumer5, publisher3 e referências9
+executados, com typecheck/build; resultados registrados no fechamento da fase.
+
+Fechamento fase6: check494, API5, consumer5, publisher3 e referências9 aprovados.
+Regressões BET40/CreateWallet25 atualizadas somente nas expectativas antigas de rota
+inexistente: agora requisição sem contrato deve retornar400. Logs multiprocesso são
+preservados; parse do relatório final foi adaptado. Métricas de resultado do consumidor
+são incrementadas após UOW confirmar, para não contar rollback como resultado final.

@@ -133,7 +133,7 @@ test('same keys in distinct providers are independent financial operations', asy
   });
 }, 20_000);
 
-test('Nest injects the BET use case and its public method has no financial HTTP endpoint', async () => {
+test('Nest injects the BET use case and HTTP rejects a request without its mandatory contract', async () => {
   await withBetDatabase(async ({ unit, app, applicationUrl }) => {
     const wallet = await creator(unit).execute(fundedInput);
     const previous = process.env['DATABASE_URL']; process.env['DATABASE_URL'] = applicationUrl;
@@ -142,7 +142,7 @@ test('Nest injects the BET use case and its public method has no financial HTTP 
       nest = await createApplication({ logger: false }); await nest.listen(0, '127.0.0.1');
       const result = await nest.get(ProcessWagerTransaction).execute(betInput(wallet.id));
       expect(result.balance.amount).toBe('75.00');
-      expect((await fetch(`${await nest.getUrl()}/wagering/transactions`, { method: 'POST' })).status).toBe(404);
+      expect((await fetch(`${await nest.getUrl()}/wagering/transactions`, { method: 'POST' })).status).toBe(400);
       await assertReconciled(app);
     } finally {
       try { await nest?.close(); } finally { if (previous === undefined) delete process.env['DATABASE_URL']; else process.env['DATABASE_URL'] = previous; }

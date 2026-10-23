@@ -156,7 +156,7 @@ test('50 identical REFUNDs in three Bun processes produce one reimbursement and 
       const reports = await bounded(Promise.all(children.map(async child => {
         const [output, error, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
         expect(error).toBe(''); expect(exitCode).toBe(0);
-        return JSON.parse(output) as { pid: number; results: WagerResult[] };
+        return JSON.parse(output.trim().split('\n').at(-1)!) as { pid: number; results: WagerResult[] };
       })));
       expect(new Set(reports.map(r => r.pid)).size).toBe(3);
       const results = reports.flatMap(r => r.results); expect(results).toHaveLength(50);

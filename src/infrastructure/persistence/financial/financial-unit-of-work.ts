@@ -1,3 +1,4 @@
+import { count } from '../../../application/observability.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { IsolationLevel } from '@mikro-orm/core';
 import type { MikroORM } from '@mikro-orm/postgresql';
@@ -22,6 +23,7 @@ export class MikroFinancialUnitOfWork implements FinancialUnitOfWork {
       }, { clear: true, isolationLevel: IsolationLevel.READ_COMMITTED });
       } catch (error) {
         if (error instanceof Error && 'code' in error && (error.code === '40001' || error.code === '40P01')) {
+          count('sql_conflicts_' + error.code);
           throw new RetryableFinancialTransactionError(error.code, { cause: error });
         }
         throw error;

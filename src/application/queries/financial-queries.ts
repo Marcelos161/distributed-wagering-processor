@@ -1,3 +1,4 @@
+import { count, record } from '../observability.js';
 import type { FinancialUnitOfWork } from '../ports/financial-persistence.js';
 import type { WagerTransaction } from '../../domain/wagering/wager-transaction.js';
 import { Money } from '../../domain/money/money.js';
@@ -62,6 +63,8 @@ export class FinancialQueries {
       if (wallet.version !== (version || 1)) issues.push('WALLET_VERSION');
       const difference = wallet.balance.subtract(calculated);
       if (!difference.isZero()) issues.push('BALANCE_DIFFERENCE');
+      count('reconciliation_checks'); if (issues.length) count('reconciliation_divergences');
+      record('reconciliation', { walletId, status: issues.length ? 'DIVERGENT' : 'CONSISTENT' });
       return { walletId, storedBalance: wallet.balance.toJSON(), calculatedBalance: calculated.toJSON(), difference: difference.toJSON(),
         consistent: issues.length === 0, checkedEntries: entries.length, issues: [...new Set(issues)] };
     });

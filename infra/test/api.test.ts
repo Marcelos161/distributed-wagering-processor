@@ -73,3 +73,35 @@ test('HTTP readiness fails when SQS is unavailable while liveness remains open',
     } finally { if (previous === undefined) delete process.env['SQS_ENDPOINT']; else process.env['SQS_ENDPOINT'] = previous; }
   });
 });
+
+test('reconciliation reports corruption without correcting history and metrics expose operational state', async () => {
+  await withApi(async (url, { owner, app }) => {
+    const id = (await request(url, '/wallets', { playerId: 'player', initialBalance: { amount: '100.00', currency: 'BRL' } })).body.id as string;
+    await request(url, '/wagering/transactions', payload(id), 'bet');
+    // Deliberately simulate out-of-band administrator damage in disposable DB only.
+    await owner.unsafe('ALTER TABLE wallets DISABLE TRIGGER ALL');
+    try { await owner`UPDATE wallets SET balance='76.00' WHERE id=${id}`; }
+    finally { await owner.unsafe('ALTER TABLE wallets ENABLE TRIGGER ALL'); }
+    const response = await request(url, `/wallets/${id}/reconciliation`, {});
+    expect(response.body).toMatchObject({ consistent: false, difference: { amount: '1.00' }, calculatedBalance: { amount: '75.00' } });
+    expect(response.body.issues).toContain('BALANCE_DIFFERENCE');
+    expect((await app`SELECT balance::text FROM wallets`)[0].balance).toBe('76.00');
+    const report = await request(url, '/metrics'); expect(report.status).toBe(200);
+    expect(report.body.process.reconciliation_divergences).toBeGreaterThanOrEqual(1);
+    expect(report.body.outbox[0].backlog).toBe('4'); expect(report.body.dlqMessages).toBeDefined();
+  });
+});
+
+test('reconciliation detects missing ledger and version gaps in an isolated damaged history', async () => {
+  await withApi(async (url, { owner }) => {
+    const id = (await request(url, '/wallets', { playerId: 'player', initialBalance: { amount: '100.00', currency: 'BRL' } })).body.id as string;
+    await request(url, '/wagering/transactions', payload(id), 'bet');
+    await request(url, '/wagering/transactions', payload(id, { kind: 'WIN', externalTransactionId: 'win' }), 'win');
+    await owner.unsafe('ALTER TABLE wallet_ledger_entries DISABLE TRIGGER ALL');
+    try { await owner`DELETE FROM wallet_ledger_entries WHERE wallet_version=2`; }
+    finally { await owner.unsafe('ALTER TABLE wallet_ledger_entries ENABLE TRIGGER ALL'); }
+    const response = await request(url, `/wallets/${id}/reconciliation`, {});
+    expect(response.body.consistent).toBe(false);
+    for (const issue of ['VERSION_GAP','BALANCE_CHAIN','MISSING_LEDGER','BALANCE_DIFFERENCE']) expect(response.body.issues).toContain(issue);
+  });
+});
