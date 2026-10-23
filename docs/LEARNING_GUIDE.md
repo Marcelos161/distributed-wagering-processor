@@ -4079,3 +4079,11 @@ Problemas corrigidos: TypeScript exigiu anotar o snapshot de fixture para preser
 o tipo terminal; SQL exigiu parênteses em `(p->'balance') - ARRAY[...]` para desambiguar
 operadores JSONB. Depois da correção:6 testes reais/51assertions aprovados. Canonicalização
 e snapshot são infraestrutura para replay; o caso de uso será integrado a seguir.
+
+Na revisão ampliada, o teste do mapper comparava um valor tipado com response:unknown;
+o typecheck recusou essa assertion. Foi corrigida para comparar com o DTO esperado
+explicitamente, sem cast que esconda o problema. O commit de persistência foi criado
+antes dessa correção por falha na sequência de verificação; a correção tem commit
+próprio e a evidência final só considera a suíte após sua execução bem-sucedida.
+Verificação após a correção: typecheck aprovado;10 testes (mapper, persistência BET
+e schema de mensagens),95 assertions, todos aprovados.
