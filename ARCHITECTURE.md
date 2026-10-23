@@ -938,7 +938,7 @@ Registro legado PENDING ou terminal sem snapshot retorna ORIGINAL_RESULT_UNAVAIL
 não é automaticamente retomado nem respondido com um saldo inventado.
 
 A UOW só traduz SQLSTATE40001/40P01 em RetryableFinancialTransactionError depois da
-rejeição da transactional oficial (rollback). O caso de uso espera10/20ms fora da
+rejeição da transactional oficial (rollback). O caso de uso espera 10/20ms fora da
 transação e refaz locks/leituras/objetos com novo EntityManager; máximo3 tentativas.
 Não há retry de 23505, conexão caída, commit de resultado incerto ou rejeição de domínio.
 Falha esgotada não deixa FAILED: a tentativa inteira foi revertida. IDs podem ter
@@ -985,3 +985,31 @@ require_bet_result agora cobre os três kinds e pendências WIN. LOSS mantém as
 anteriores que proíbem ledger. Downgrade restaura versão5 somente sem dados novos;
 com dados WIN/LOSS/pendentes recusa55000, preservando evidência em vez de apagá-la.
 Alternativa de apagar comprovantes automaticamente foi recusada por perda de auditoria.
+
+## ADR-025 — Um fluxo financeiro para BET, WIN e LOSS
+
+ProcessWagerTransaction compartilha admissão/replay/locks/persistência/eventos/resultados.
+Método apply concentra decisões por kind usando Wallet e validação de referência já
+existente em WagerTransaction. Sem entidades/estratégias duplicadas, sem ORM no domínio.
+Evento é escolhido pelo status; movimento opcional só controla Wallet/ledger/BalanceChanged.
+
+WIN: referência opcional resolvida pelo provedor depois do lock da própria Wallet.
+ledgerDirectionFor reutiliza validação local; pendência, INVALID_REFERENCE e overflow
+seguem aprovações da ADR024. LOSS zero usa mesmo lock para fotografar saldo e versão
+consistentes; custa serialização curta com movimentos da mesma carteira. Alternativa
+sem lock dependeria de isolamento/snapshot adicionais e permitiria capturar estado
+anterior a uma movimentação ainda em andamento. Não incrementa versão nem salva Wallet.
+
+Não adicionamos locks de identidade da referência ou outra carteira depois do lock da
+Wallet. READ COMMITTED permite reler estado confirmado pelo escritor anterior;
+referências processadas são imutáveis. Uma operação não visível fica pendente, sem
+bloqueio circular entre WINs. Reprocessador futuro deverá seguir admissão → Wallet →
+consulta de referência e nunca reutilizar objetos de tentativa abortada. Nenhuma
+redelivery ativa reprocessamento de pendência nesta etapa. Resultado terminal é lido
+conforme lifecycle atual; receipt inicial permanece para auditoria.
+
+Retentativas SQL continuam limitadas aos 40001/40P01 já aprovados. Falha de infraestrutura
+não vira rejeição financeira. Scripts/testes em bancos descartáveis não aplicam migrations
+ao principal. HTTP, consumers, publishers, REFUND/ROLLBACK e worker aguardam nova etapa.
+Fontes: [READ COMMITTED](https://www.postgresql.org/docs/17/transaction-iso.html),
+[locks PostgreSQL](https://www.postgresql.org/docs/17/explicit-locking.html).

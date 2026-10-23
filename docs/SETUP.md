@@ -355,3 +355,13 @@ test:migrations e, por último, test:infra (reinicia containers). Nunca rode tes
 em paralelo com suites que mantêm transações abertas. O replay persiste DTO v1,
 incluindo saldo original de rejeição; down da00005remove esses snapshots e é testado
 apenas em banco descartável. Não há rota de apostas nem publicação de eventos.
+
+### WIN, LOSS e pendências (bancos descartáveis)
+
+`bun run test:wager` executa as suítes `infra/test/wager-*.test.ts`, aplicando até a
+migration00006 exclusivamente em bancos `dwp_test_*`. Inclui snapshots, casos de uso,
+referências e falhas. `bun run test:bet` continua verificando o contrato anterior.
+Use `bun run check` para typecheck/unitários/build. Não é necessário migrar o banco
+principal para executar testes; não use `migration:up` contra ele por este motivo.
+Downgrade00006 recusa55000 se houver resultados WIN/LOSS ou comprovantes pendentes,
+para não apagar auditoria. A volta sem dados novos é validada em banco descartável.

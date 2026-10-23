@@ -11,3 +11,14 @@ export async function withWagerDatabase(run: (db: BetDatabase) => Promise<void>)
     finally { await appOrm.close(); }
   });
 }
+
+import type { WagerInput } from '../../src/application/wagering/prepare-wager.js';
+import type { SQL } from 'bun';
+import { betInput, databaseState } from './bet-processing-support.js';
+
+export function wagerInput(walletId: string, kind: 'WIN' | 'LOSS' = 'WIN', patch: Partial<WagerInput> = {}): WagerInput {
+  return { ...betInput(walletId), kind, money: { amount: kind === 'WIN' ? '40.50' : '0.00', currency: 'BRL' }, ...patch };
+}
+export async function wagerState(sql: SQL): Promise<unknown> {
+  return { financial: await databaseState(sql), pending: await sql`SELECT * FROM wager_pending_receipts ORDER BY transaction_id` };
+}

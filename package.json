@@ -32,7 +32,8 @@
     "test:persistence": "bun test ./infra/test/persistence-*.test.ts",
     "test:messaging": "bun test ./infra/test/messaging-*.test.ts",
     "test:wallet-creation": "bun test ./infra/test/wallet-creation-*.test.ts",
-    "test:bet": "bun test ./infra/test/bet-*.test.ts"
+    "test:bet": "bun test ./infra/test/bet-*.test.ts",
+    "test:wager": "bun test ./infra/test/wager-*.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

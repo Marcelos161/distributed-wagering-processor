@@ -4537,3 +4537,167 @@ unitários/aplicação e build. `bun test ./infra/test/bet-persistence.test.ts
 ./infra/test/wager-snapshots.test.ts`: 12 testes reais, zero falhas. Os novos testes
 precisaram usar enums e objetos esperados tipados nas assertions do Bun/TypeScript;
 a tipagem foi corrigida antes do commit, sem relaxar strict.
+
+## 32. O mesmo caso de uso processa BET, WIN e LOSS
+
+Resultado de jogo e movimento de saldo não são sinônimos. Se a carteira começa
+com 100.00 e a BET consome 25.00, o saldo já é 75.00. Perder a rodada (LOSS) não consome
+mais 25.00. Ganhar 40.50 acrescenta 40.50 e resulta em 115.50. WIN pode referenciar a BET
+para comprovar o contexto da rodada; não é reversão e não precisa ter o mesmo valor.
+Uma referência só é resolvida por `(providerId, externalTransactionId)`, nunca por
+ID global ou apenas pela rodada. gameId não é vínculo exigido pelo contrato oficial;
+provider, jogador, carteira, moeda, rodada e kind BET são conferidos pelo domínio.
+
+### Fluxo completo e atomicidade
+
+```mermaid
+flowchart TD
+  A[Validar entrada e hash] --> B[Locks das identidades]
+  B --> C{Operação existente?}
+  C -->|sim| D[Comparar hash e ler comprovante ou resultado histórico]
+  C -->|não| E[Lock da Wallet e validação de identidade]
+  E --> F[Inserir PENDING e consultar referência no mesmo provedor]
+  F --> G{Resultado de domínio}
+  G -->|BET| H[Debitar ou rejeitar sem saldo]
+  G -->|WIN| I[Creditar, rejeitar referência/teto, ou aguardar referência]
+  G -->|LOSS| J[Marcar PROCESSED sem movimento]
+  H --> K[Lifecycle + Wallet/ledger quando aplicáveis]
+  I --> K
+  J --> K
+  K --> L[Outbox + resultado terminal ou comprovante pendente]
+  L --> M[COMMIT, inclusive constraints diferíveis]
+  M --> N[Retornar DTO]
+```
+
+A Outbox é um registro local de intenção de publicação. Nenhum destes eventos foi
+publicado no SQS pelo caso de uso. `execute` só resolve depois de COMMIT, inclusive
+quando as constraints diferíveis são avaliadas. Uma falha desfaz todos os INSERTs e
+UPDATEs. A Wallet em memória pode ter mudado; a próxima tentativa lê outra instância.
+
+| Resultado | Wallet/ledger | Outbox desta operação | Snapshot |
+|---|---|---|---|
+| BET processada | débito, versão+1, DEBIT | Processed + BalanceChanged | terminal |
+| WIN processada | crédito, versão+1, CREDIT | Processed + BalanceChanged | terminal |
+| LOSS processada | nenhum, versão preservada | Processed | terminal |
+| rejeição | nenhum | Rejected | terminal com failureCode |
+| WIN aguardando | nenhum | PendingReference | comprovante pendente |
+| replay | nenhum | nenhum novo | lê registro histórico |
+
+### Métodos de ProcessWagerTransaction
+
+Arquivo `src/application/wagering/process-wager-transaction.ts`. Domínio continua
+sem imports de Nest/MikroORM. Dependências recebidas: FinancialUnitOfWork, IdGenerator,
+Clock; métodos privados usam portas dos repositórios e classes financeiras/eventos.
+
+- **constructor(unit, ids, clock)**: guarda dependências, não consulta banco nem
+  cria objetos financeiros; retorna instância. Nest usa sua factory já existente e
+  testes usam processor. Não foi criada factory/caso de uso separado para WIN/LOSS.
+- **execute(input: WagerInput): Promise<WagerResult>**: valida/copia antes de I/O,
+  abre UOW e chama process. Retorna DTO congelado após commit; propaga admissão,
+  domínio inesperado e SQL. Apenas RetryableFinancialTransactionError 40001/40P01
+  refaz até 3 tentativas inteiras, com espera 10/20ms fora da SQL e entidades novas.
+  Rejeição de negócio retorna normalmente, não aciona retry. Chamador futuro: HTTP
+  ou fronteira sem Inbox. Exemplo: WIN 40.50 sem referência retorna PROCESSED 115.50.
+- **processInTransaction(input, repositories): Promise<WagerResult>**: a mesma
+  validação/processamento em UOW do chamador; não abre outra SQL nem faz retry
+  parcial. Resultado é provisório. Futuro consumidor comporá Inbox e somente fará
+  ACK após a fronteira externa confirmar. Não é worker de referências pendentes.
+- **process(prepared: PreparedWager, repos): Promise<WagerResult>**, privado:
+  1. obtém locks de key/externalId em ordem determinística;
+  2. busca por key, compara hash e lê resultado do status atual; pendente usa receipt,
+     terminal usa result. Ausência/incompatibilidade gera ORIGINAL_RESULT_UNAVAILABLE,
+     preservando o tratamento fail-closed de legado;
+  3. externalId existente com outra key é conflito; nenhum saldo/evento novo;
+  4. trava Wallet, exige existência/jogador/moeda; captura Clock e cria transação;
+  5. insere PENDING, resolve referência por SELECT após o lock e chama apply;
+  6. salva Wallet somente se mudou, atualiza lifecycle, insere ledger quando existe;
+  7. escolhe evento por **status**, não pela presença de movimento: isso é essencial
+     para LOSS processada, que não possui movimento;
+  8. acrescenta BalanceChanged só se movement existe; grava comprovante ou resultado
+     com saldo e versão travados; retorna idempotentReplay=false.
+  Erros: WagerProcessingError de conflito/identidade/resultado ausente, domínio não
+  esperado, erros dos repositórios/SQL. Todos abortam a UOW. Evento/contexto usa tx.id,
+  como BET. Não há chamada ao broker, lookup entre provedores ou lock de referência.
+- **apply(tx: WagerTransaction, wallet: Wallet, reference: WagerTransaction|undefined,
+  at: Date): WalletMovementResult|undefined**, privado e sem I/O: só manipula objetos
+  frescos. Para WIN chama ledgerDirectionFor(reference), que já valida todos os vínculos
+  e status no domínio; REFERENCE_REQUIRED/REFERENCE_NOT_PROCESSED leva a pendência;
+  INVALID_REFERENCE leva a reject(INVALID_REFERENCE). Outros erros propagam. Se a
+  referência é válida/omitida, compara Money(balance+prêmio) com teto antes de alterar
+  carteira; overflow leva a DOMAIN_RULE_VIOLATION. BET chama debit, WIN chama credit;
+  captura somente INSUFFICIENT_FUNDS de Wallet, como antes. LOSS não chama nenhum
+  movimento. Encerra com markProcessed(reference,at). undefined pode significar LOSS,
+  rejeição ou pendência; por isso process consulta status. Alternativa de estratégia
+  polimórfica por kind adicionaria classes sem necessidade para três caminhos curtos.
+
+Referência válida ainda PENDING espera; referência terminal REJECTED/FAILED é
+inutilizável e rejeitada. ID que só existe em outro provedor é ausente no escopo
+correto. BETs processadas são imutáveis; uma referência confirmada não muda depois.
+A leitura após o lock em READ COMMITTED vê o commit do escritor anterior da carteira.
+Não travamos a identidade da referência depois da Wallet: isso poderia inverter a
+ordem de locks e criar ciclos. Uma referência não visível vira pendência, que é segura.
+Base: [isolamento PostgreSQL17](https://www.postgresql.org/docs/17/transaction-iso.html)
+e [locks de linhas](https://www.postgresql.org/docs/17/explicit-locking.html).
+
+### Repetição pendente e transição futura
+
+WIN chega antes da BET: grava PENDING_REFERENCE, comprovante100.00/versão1 e1evento.
+BET chega e debita25.00: Wallet75.00/versão2. Reenviar a WIN continua retornando o
+comprovante100.00, sem crédito ou evento adicional. O futuro worker deverá adquirir
+as mesmas identidades antes da Wallet, reler a pendência e a BET, aplicar o domínio,
+gravar movimento/lifecycle/novos eventos/resultado terminal atomicamente. Depois,
+replay retornará115.50/PROCESSED. O comprovante100.00 continua imutável para auditoria.
+Isso foi simulado num teste por composição explícita dos repositórios; **não existe
+worker, agendamento, TTL nem retry operacional de referências nesta entrega**.
+
+### Helpers e testes funcionais
+
+`infra/test/wager-support.ts::wagerInput(walletId:string, kind:'WIN'|'LOSS'='WIN',
+patch:Partial<WagerInput>={}): WagerInput` reutiliza fixture BET, troca kind e Money
+(40.50 ou0.00), aplica patch; sem I/O/validação, só testes usam. `wagerState(sql:SQL):
+Promise<unknown>` combina databaseState anterior com SELECT ordenado de receipts;
+serve de comparação integral antes/depois de falhas/replay. Dinheiro sai como strings;
+falha SQL propaga. Ambos usam o banco descartável de withWagerDatabase.
+
+`infra/test/wager-functional.test.ts`: callbacks async recebem os parâmetros indicados,
+retornam Promise<void>, usam fixtures reais, PostgreSQL, processor e expect. Erro de
+assertion/SQL falha o teste; recursos são encerrados no finally do helper.
+
+| Teste (nome inicial) | Parâmetro, lógica e evidência |
+|---|---|
+| `BET followed by %s...` | WIN/LOSS: abre100, debita25, processa resultado; confere115.50 ou75.00, versão3 ou2, ledger, eventos não publicados, snapshot e xmin igual entre registros. |
+| `WIN decimal addition...` | Sem parâmetro:0.10+0.20=0.30; wallet no teto rejeita40.50 com evento e sem ledger. |
+| `%s admission leaves...` | 11 casos: WIN zero/negativo/teto; LOSS positivo/referência; ambos com wallet ausente/jogador/moeda incorretos. Estado integral deve permanecer igual. |
+| `%s replay survives...` | WIN/LOSS: processa, faz BET posterior, fecha ORM de verdade e abre outro; replay histórico, hash divergente e externalId com outra key não alteram tabelas. |
+| `%s same identities...` | WIN/LOSS em dois provedores, mesma key/external: dois IDs diferentes, saldo181 ou100. |
+| `WIN resolves processed BET...` | Referência processada, prêmio40.50 diferente da aposta25, game diferente permitido; ID interno resolvido e mudar referência conflita com hash. |
+| `WIN reference %s...` | 9 cenários: rodada, wallet/jogador, moeda, kind, rejeitada, failed, pending, ausente, outro provedor. Rejeita seis; aguarda últimos três; nenhum crédito e só um evento, replay sem escrita. Identidades impossíveis pelas FKs não são artificialmente persistidas: wallet/jogador divergentes vêm de outra wallet válida. |
+| `WIN before BET...` | Chegada fora de ordem, replay pendente após BET e transição futura simulada com entidades/ledger/eventos; prova coexistência de receipt100 e result115.50. |
+
+### Falhas e rollback
+
+`infra/test/wager-rollback.test.ts` usa triggers de falha **no PostgreSQL real**, não
+repositórios mockados. Wrappers de UOW só posicionam barreiras/observação.
+
+- `%s rolls back all records...`: matriz11 casos (WIN5 tabelas, LOSS3, pendência3).
+  SQL de teste `fail_wager_write(): trigger` lança P0001 antes da escrita selecionada;
+  em WIN a falha Outbox ocorre no segundo evento, depois do primeiro. Compara todas
+  as tabelas, remove trigger com DROP FUNCTION CASCADE e repete usando estado fresco.
+- `%s cannot report success before deferred commit...`: WIN/LOSS/pendência. Wrapper
+  executa caso de uso, altera Wallet em0.01 sem ledger e segura antes do commit.
+  Observador vê só estado anterior e promise não retornou sucesso. Libera,23514
+  reverte tudo; reutilizar Wallet suja falha ownership; nova execução funciona.
+- `WIN retry after a server serialization failure...`: `retry_win(): trigger` usa
+  sequência win_attempts, falha40001 no primeiro INSERT do snapshot (após crédito,
+  ledger e eventos). Sequência não é revertida; segunda tentativa confirma um único
+  crédito/versão2. Prova tratamento do SQLSTATE injetado, não detector de deadlock.
+
+Todos esses testes terminam reconciliando saldo com soma CREDIT menos DEBIT. Execuções:
+29 funcionais novos passaram;15 rollback novos +29 funcionais/rollback BET =44 passaram;
+typecheck OK. Concorrência e regressão completa serão registradas no fechamento.
+
+Fechamento do processamento compartilhado: `bun run check` passou 478 testes,
+typecheck/build. `bun run test:wager` passou 50 testes (6 snapshots, 29 funcionais,
+15 rollback). `bun run test:bet` passou os 40 anteriores. Nenhum teste usa o banco
+principal. A ampliação do processador foi mantida em um commit coerente para evitar
+duplicar o caminho transacional por kind; provas adicionais de concorrência vêm a seguir.

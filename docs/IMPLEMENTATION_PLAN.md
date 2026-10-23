@@ -234,7 +234,7 @@ Nenhum push. As etapas seguintes continuam dependendo de nova autorização.
 Etapa BET autorizada após CreateWallet: começa pela canonicalização de admissão
 (seção26 do guia/ADR-021). Usuário aprovou snapshot imutável separado e versionado,
 locks PostgreSQL por duas identidades antes da Wallet, erros de admissão para vínculos
-inválidos e até3 tentativas para40P01/40001. Persistência/replay, processamento, provas
+inválidos e até 3 tentativas para40P01/40001. Persistência/replay, processamento, provas
 concorrentes e rollback ainda serão implementados nos incrementos seguintes. Sem HTTP,
 consumer/publisher, outros kinds ou alterações no banco principal.
 
@@ -263,3 +263,9 @@ Segundo incremento WIN/LOSS: migration00006 e repositório de comprovantes, ampl
 de snapshots terminais, permissões/imutabilidade e downgrade protegido. Testes reais
 em descartáveis cobrem up/down/reaplicação, consistência e rollback no commit.
 Processamento de WIN/LOSS ainda será integrado; nenhuma migration aplicada ao principal.
+
+Terceiro incremento WIN/LOSS: ProcessWagerTransaction compartilhado, crédito/registro
+sem movimento, referências opcionais/pendência/rejeição, snapshots/replay histórico e
+atomicidade. 29 testes funcionais e 15 rollback novos executados em PostgreSQL. Worker
+não implementado; teste simula apenas a transição futura por entidades/repositórios.
+Próximo incremento desta autorização: concorrência real e fechamento de regressões.

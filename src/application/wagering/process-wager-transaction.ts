@@ -1,21 +1,23 @@
 import type { FinancialRepositories, FinancialUnitOfWork } from '../ports/financial-persistence.js';
 import type { Clock, IdGenerator } from '../ports/runtime.js';
 import { RetryableFinancialTransactionError } from '../errors/retryable-financial-transaction-error.js';
-import { prepareBet, type BetInput, type PreparedBet } from './prepare-bet.js';
+import { prepareWager, type WagerInput, type PreparedWager } from './prepare-wager.js';
 import { WagerProcessingError } from './wager-processing-error.js';
-import type { WagerResult, WagerResultSnapshot } from './wager-result.js';
+import type { WagerResult, WagerResultSnapshot, PendingWagerReceipt } from './wager-result.js';
 import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from '../../domain/wagering/wager-transaction.js';
 import { FailureCode } from '../../domain/wagering/failure-code.js';
 import { WalletError } from '../../domain/wallet/wallet-error.js';
-import type { WalletMovementResult } from '../../domain/wallet/wallet.js';
-import { WagerTransactionProcessed, WagerTransactionRejected, WalletBalanceChanged } from '../../domain/messaging/financial-events.js';
+import type { Wallet, WalletMovementResult } from '../../domain/wallet/wallet.js';
+import { WagerTransactionProcessed, WagerTransactionRejected, WagerTransactionPendingReference, WalletBalanceChanged } from '../../domain/messaging/financial-events.js';
+import { Money } from '../../domain/money/money.js';
+import { WagerTransactionError } from '../../domain/wagering/wager-transaction-error.js';
 import { OutboxMessage } from '../../domain/messaging/outbox-message.js';
 
 export class ProcessWagerTransaction {
   constructor(private readonly unit: FinancialUnitOfWork, private readonly ids: IdGenerator, private readonly clock: Clock) {}
 
-  async execute(input: BetInput): Promise<WagerResult> {
-    const prepared = prepareBet(input);
+  async execute(input: WagerInput): Promise<WagerResult> {
+    const prepared = prepareWager(input);
     for (let attempt = 1; ; attempt++) {
       try { return await this.unit.run(repos => this.process(prepared, repos)); }
       catch (error) {
@@ -28,19 +30,21 @@ export class ProcessWagerTransaction {
 
   /** Composition point for a future Inbox boundary. Result is provisional until its owner commits.
    * Caller must retry the ENTIRE boundary, including Inbox, on a retryable failure. */
-  processInTransaction(input: BetInput, repositories: FinancialRepositories): Promise<WagerResult> {
-    return this.process(prepareBet(input), repositories);
+  processInTransaction(input: WagerInput, repositories: FinancialRepositories): Promise<WagerResult> {
+    return this.process(prepareWager(input), repositories);
   }
 
-  private async process(prepared: PreparedBet, repos: FinancialRepositories): Promise<WagerResult> {
+  private async process(prepared: PreparedWager, repos: FinancialRepositories): Promise<WagerResult> {
     const { input, money, payloadHash } = prepared;
     await repos.wagerAdmission.lock(input.providerId, input.idempotencyKey, input.externalTransactionId);
     const existing = await repos.transactions.findByIdempotencyKey(input.providerId, input.idempotencyKey);
     if (existing) {
       if (!existing.matchesPayload(payloadHash)) throw new WagerProcessingError('IDEMPOTENCY_CONFLICT', 'Idempotency key is already bound to a different payload');
-      const original = await repos.wagerResults.findByTransactionId(existing.id);
+      const original = existing.status === WagerTransactionStatus.PendingReference
+        ? await repos.wagerResults.findPendingReceipt(existing.id)
+        : await repos.wagerResults.findByTransactionId(existing.id);
       if (!original || original.status !== existing.status) {
-        throw new WagerProcessingError('ORIGINAL_RESULT_UNAVAILABLE', 'Existing operation has no compatible original terminal result');
+        throw new WagerProcessingError('ORIGINAL_RESULT_UNAVAILABLE', 'Existing operation has no compatible original result');
       }
       return Object.freeze({ ...original, idempotentReplay: true });
     }
@@ -50,38 +54,72 @@ export class ProcessWagerTransaction {
     const wallet = await repos.wallets.findByIdForUpdate(input.walletId);
     if (!wallet) throw new WagerProcessingError('WALLET_NOT_FOUND', 'Wallet does not exist');
     if (wallet.playerId !== input.playerId) throw new WagerProcessingError('WALLET_PLAYER_MISMATCH', 'Player does not own this wallet');
-    if (wallet.currency !== money.currency) throw new WagerProcessingError('WALLET_CURRENCY_MISMATCH', 'BET currency differs from wallet currency');
+    if (wallet.currency !== money.currency) throw new WagerProcessingError('WALLET_CURRENCY_MISMATCH', 'Operation currency differs from wallet currency');
 
     const at = this.clock.now();
-    const tx = WagerTransaction.create({ ...input, kind: WagerTransactionKind.Bet, money,
+    const tx = WagerTransaction.create({ ...input, kind: input.kind as WagerTransactionKind, money,
       id: this.ids.next(), payloadHash, createdAt: at });
-    await repos.transactions.insert(tx); // PENDING; terminal outcome and result are required before commit.
-    let movement: WalletMovementResult | undefined;
-    try {
-      movement = wallet.debit({ money, transactionId: tx.id, ledgerEntryId: this.ids.next(), at });
-    } catch (error) {
-      if (!(error instanceof WalletError) || error.code !== 'INSUFFICIENT_FUNDS') throw error;
-      tx.reject(FailureCode.InsufficientFunds);
-    }
-    if (movement) {
-      tx.markProcessed(undefined, at);
-      await repos.wallets.save(wallet);
-      await repos.transactions.updateLifecycle(tx);
-      await repos.ledger.insert(movement.entry, movement.walletVersion);
-    } else {
-      await repos.transactions.updateLifecycle(tx);
-    }
+    await repos.transactions.insert(tx); // Initial PENDING; this call persists a terminal result or a pending-reference receipt.
+    // Read after the wallet lock: same-wallet writers commit before this SELECT.
+    // Do not acquire reference identity/wallet locks here: that would invert admission order.
+    const reference = input.referenceExternalTransactionId === undefined ? undefined
+      : (await repos.transactions.findByExternalId(input.providerId, input.referenceExternalTransactionId)) ?? undefined;
+    const movement = this.apply(tx, wallet, reference, at);
+    if (movement) await repos.wallets.save(wallet);
+    await repos.transactions.updateLifecycle(tx);
+    if (movement) await repos.ledger.insert(movement.entry, movement.walletVersion);
     const context = { correlationId: tx.id, causationId: tx.id, occurredAt: at };
-    const event = movement
+    const event = tx.status === WagerTransactionStatus.PendingReference
+      ? WagerTransactionPendingReference.from(tx, { ...context, eventId: this.ids.next() })
+      : tx.status === WagerTransactionStatus.Processed
       ? WagerTransactionProcessed.from(tx, { ...context, eventId: this.ids.next() })
       : WagerTransactionRejected.from(tx, { ...context, eventId: this.ids.next() });
     await repos.outbox.insert(OutboxMessage.enqueue(event));
     if (movement) await repos.outbox.insert(OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, movement.entry,
       { ...context, eventId: this.ids.next() })));
+    if (tx.status === WagerTransactionStatus.PendingReference) {
+      const receipt: PendingWagerReceipt = Object.freeze({ transactionId: tx.id, status: tx.status, balance: Object.freeze(wallet.balance.toJSON()) });
+      await repos.wagerResults.insertPendingReceipt(receipt, wallet.version);
+      return Object.freeze({ ...receipt, idempotentReplay: false });
+    }
+    if (tx.status !== WagerTransactionStatus.Processed && tx.status !== WagerTransactionStatus.Rejected) {
+      throw new Error('Unexpected wager outcome');
+    }
     const result: WagerResultSnapshot = Object.freeze({ transactionId: tx.id,
-      status: movement ? WagerTransactionStatus.Processed : WagerTransactionStatus.Rejected,
+      status: tx.status,
       balance: Object.freeze(wallet.balance.toJSON()), ...(tx.failureCode === undefined ? {} : { failureCode: tx.failureCode }) });
     await repos.wagerResults.insert(result, wallet.version);
     return Object.freeze({ ...result, idempotentReplay: false });
+  }
+
+  /** Mutates only fresh domain objects. Persistence and event selection stay in the shared path. */
+  private apply(tx: WagerTransaction, wallet: Wallet, reference: WagerTransaction | undefined, at: Date): WalletMovementResult | undefined {
+    if (tx.kind === WagerTransactionKind.Win) {
+      try { tx.ledgerDirectionFor(reference); } // Reuse domain reference validation before any credit.
+      catch (error) {
+        if (!(error instanceof WagerTransactionError)) throw error;
+        if (error.code === 'REFERENCE_REQUIRED' || error.code === 'REFERENCE_NOT_PROCESSED') tx.markPendingReference();
+        else if (error.code === 'INVALID_REFERENCE') tx.reject(FailureCode.InvalidReference);
+        else throw error;
+        return undefined;
+      }
+      const limit = Money.from({ amount: '999999999999999999.99', currency: wallet.currency });
+      if (limit.isLessThan(wallet.balance.add(tx.money))) {
+        tx.reject(FailureCode.DomainRuleViolation);
+        return undefined;
+      }
+    }
+    let movement: WalletMovementResult | undefined;
+    if (tx.kind !== WagerTransactionKind.Loss) {
+      const props = { money: tx.money, transactionId: tx.id, ledgerEntryId: this.ids.next(), at };
+      try { movement = tx.kind === WagerTransactionKind.Bet ? wallet.debit(props) : wallet.credit(props); }
+      catch (error) {
+        if (!(error instanceof WalletError) || error.code !== 'INSUFFICIENT_FUNDS') throw error;
+        tx.reject(FailureCode.InsufficientFunds);
+        return undefined;
+      }
+    }
+    tx.markProcessed(reference, at);
+    return movement;
   }
 }
