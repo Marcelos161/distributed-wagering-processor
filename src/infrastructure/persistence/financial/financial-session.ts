@@ -13,6 +13,8 @@ export class FinancialSession {
   readonly #identity = Symbol('financial session');
   #active = true;
   #lastLockedId: string | undefined;
+  #wagerAdmitted = false;
+  #financialStarted = false;
   readonly #wallets = new WeakMap<Wallet, { locked: boolean; version: number }>();
 
   constructor(private readonly em: EntityManager) {
@@ -44,6 +46,7 @@ export class FinancialSession {
 
   beforeLock(id: string): void {
     this.assertActive();
+    this.#financialStarted = true;
     if (this.#lastLockedId !== undefined && id < this.#lastLockedId) {
       throw new Error('Acquire wallet locks in ascending identifier order');
     }
@@ -52,6 +55,7 @@ export class FinancialSession {
 
   attachWallet(wallet: Wallet, locked: boolean): void {
     this.assertActive();
+    if (locked) this.#financialStarted = true;
     const owner = walletOwners.get(wallet);
     if (owner && owner !== this.#identity) throw new Error('Reload Wallet in the current transaction; do not reuse an earlier instance');
     walletOwners.set(wallet, this.#identity);
@@ -75,6 +79,12 @@ export class FinancialSession {
     const owner = transactionOwners.get(transaction);
     if (owner && owner !== this.#identity) throw new Error('Reload WagerTransaction in the current transaction');
     transactionOwners.set(transaction, this.#identity);
+  }
+
+  beforeWagerAdmission(): void {
+    this.assertActive();
+    if (this.#wagerAdmitted || this.#financialStarted) throw new Error('Admit one wager before acquiring wallet locks or writing wallets');
+    this.#wagerAdmitted = true;
   }
 
   assertTransaction(transaction: WagerTransaction): void {

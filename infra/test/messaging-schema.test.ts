@@ -6,11 +6,11 @@ const payload = { eventId: 'event', aggregateId: 'tx', eventType: 'WagerTransact
     externalTransactionId: 'external', roundId: 'r', gameId: 'g', kind: 'LOSS', status: 'PROCESSED', money: { amount: '0.00', currency: 'BRL' } } };
 test('messaging migration is repeatable and reversible independently of financial tables', async () => {
   await withFinancialDatabase('Migration20261023000004', async ({ orm, app }) => {
-    expect(await orm.migrator.up()).toEqual([]);
+    expect(await orm.migrator.up({ to: 'Migration20261023000004' })).toEqual([]);
     await orm.migrator.down({ to: 'Migration20261023000003' });
     expect((await app`SELECT to_regclass('public.inbox_messages') AS inbox, to_regclass('public.wallets') AS wallets`)[0])
       .toEqual({ inbox: null, wallets: 'wallets' });
-    await orm.migrator.up();
+    await orm.migrator.up({ to: 'Migration20261023000004' });
     expect((await app`SELECT count(*)::text AS n FROM outbox_messages`)[0].n).toBe('0');
   });
 }, 20_000);

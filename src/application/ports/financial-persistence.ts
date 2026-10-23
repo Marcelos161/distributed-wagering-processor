@@ -1,4 +1,5 @@
 import type { InboxRepository, OutboxRepository } from './message-persistence.js';
+import type { WagerAdmissionRepository, WagerResultRepository } from './wager-persistence.js';
 import type { Wallet } from '../../domain/wallet/wallet.js';
 import type { WalletLedgerEntry } from '../../domain/wallet/wallet-ledger-entry.js';
 import type { WagerTransaction } from '../../domain/wagering/wager-transaction.js';
@@ -31,6 +32,8 @@ export interface LedgerEntryRepository {
 }
 
 export interface FinancialRepositories {
+  readonly wagerAdmission: WagerAdmissionRepository;
+  readonly wagerResults: WagerResultRepository;
   readonly inbox: InboxRepository;
   readonly outbox: OutboxRepository;
   readonly wallets: WalletRepository;

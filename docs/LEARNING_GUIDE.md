@@ -3950,3 +3950,132 @@ sem infraestrutura; assertions lançam em divergência. input é fixture readonl
 Evidência deste incremento: typecheck OK;25 testes aprovados,66 assertions. Nenhuma
 mudança em entidades ou schema. Decisões de snapshot/locks/retry aprovadas para os
 próximos incrementos, ainda não provadas por este teste puro.
+
+## 27. Resultado histórico e admissão persistente de BET
+
+Decisões aprovadas: tabela separada de snapshots imutáveis; locks transacionais por
+duas identidades, antes da Wallet. Um replay não pode ler o saldo atual: se a primeira
+BET levou100.00→75.00 e outra levou75.00→65.00, a resposta da primeira continua75.00.
+Rejeições não têm ledger para reconstruir esse resultado, justificando persistir o
+snapshot mesmo que status/moeda também existam na transação. wallet_version é metadado
+para conferir o instante capturado; não altera a resposta do README.
+
+### Migration20261023000005 (migrations/Migration20261023000005.ts)
+
+`up():Promise<void>` registra SQL via addSql no Migrator oficial, sem argumentos.
+Cria wager_transaction_results com PK/FK transaction_id, schema_version=1,
+wallet_version positivo seguro e response JSONB. A versão permite evolução explícita
+sem interpretar um contrato antigo como atual. response guarda transactionId,status,
+balance e failureCode quando terminal negativo; idempotentReplay descreve a entrega,
+portanto é calculado ao responder. Nenhum header/envelope é guardado nessa tabela.
+
+`down():Promise<void>` remove trigger na transação, tabela e três funções novas, nessa
+ordem de dependências. É destrutivo para os snapshots, como qualquer down que remove
+tabela, e só foi executado em banco descartável. Não altera migrations anteriores.
+Up não reescreve registros antigos nem inventa resultado de rejeição legada. A exigência
+vale para INSERT/UPDATE posterior da BET; replay legado sem snapshot deverá falhar
+explicitamente. Aplicação no principal não foi autorizada nem realizada.
+
+Funções SQL, chamadas por checks/triggers, com search_path fixo:
+
+| Função | Parâmetros/retorno e fluxo |
+|---|---|
+| valid_wager_result(p jsonb):boolean | Valida objeto v1 de chaves exatas, ID, Money string normalizada/limite via message_json_money, status terminal e presença/ausência de failureCode. COALESCE impede NULL passar como válido. Não consulta tabelas. |
+| check_wager_result():trigger | BEFORE INSERT, recebe NEW implicitamente; recusa JSON inválido, busca WagerTransaction, exige BET terminal/status/failure/moeda iguais; bloqueia Wallet NO KEY UPDATE e compara saldo/versão; PROCESSED também precisa de ledger com mesmo saldo/versão. Retorna NEW ou lança23514/23503. PK/FK/checks continuam ativos. |
+| require_bet_result():trigger | Constraint trigger diferível AFTER INSERT/UPDATE da transação; lê seu estado final e exige snapshot se BET terminal. Retorna NULL ou lança23514 no commit. Isso impede confirmar efeito/rejeição novos sem resultado. |
+
+Triggers wager_results_immutable/no_truncate reutilizam reject_financial_mutation,
+recusando UPDATE/DELETE/TRUNCATE inclusive pelo owner. Papel app recebe só SELECT e
+INSERT; execute apenas no validador usado no CHECK. Não há permissões de DDL concedidas.
+Resultado é validado no instante da captura sob lock e não revalidado contra saldo
+futuro ao ler. PK oferece lookup por transactionId; não é necessário índice duplicado.
+
+### Portas, mapper e adaptadores
+
+`src/application/wagering/wager-result.ts`: interfaces readonly WagerResultSnapshot
+(transactionId:string,status terminal,balance:Readonly<MoneyProps>,failureCode opcional)
+e WagerResult (adiciona idempotentReplay:boolean). São DTOs, sem comportamento financeiro.
+`src/application/ports/wager-persistence.ts`: WagerAdmissionRepository.lock recebe
+três strings e retorna Promise<void>; WagerResultRepository.findByTransactionId(string)
+retorna snapshot|null; insert(snapshot,version:number) retorna Promise<void>.
+
+Em `src/infrastructure/persistence/financial/wager-result-mapper.ts`:
+
+- `WagerResultMapper.toSnapshot(row:WagerResultRecord):WagerResultSnapshot` exige versão1,
+  identidade igual à coluna, estrutura e chaves exatas, Money normalizado, faixa
+  persistível, status/failure de BET coerentes e wallet_version string segura. Retorna
+  cópia congelada também em balance; TypeError/RangeError/MoneyError propagam. Usa
+  MoneyMapper para o teto; não reconstrói saldo lendo Wallet. Chamado pelo repositório.
+- `toRecord(result:WagerResultSnapshot,walletVersion:number):WagerResultRecord` valida
+  contador seguro, converte versão para string, chama toSnapshot para validar/capturar
+  cópia e devolve colunas. Não passa dinheiro por number. Chamado por insert.
+
+Em `wager-result-repository.ts`, mesmo diretório: construtor recebe FinancialSession
+e a armazena, sem I/O. `findByTransactionId(id:string)` usa SELECT parametrizado e
+wallet_version::text; retorna mapper ou null. `insert(result,version)` usa mapper,
+JSON.stringify + castjsonb no INSERT parametrizado; nunca UPDATE/upsert. Erros de
+sessão/mapper/SQL propagam. O caso de uso usará ambos na UOW atual; banco valida vínculos.
+
+Em `wager-admission-repository.ts`:
+
+- `lockAddress(scope:string,provider:string,identity:string):bigint`: helper privado,
+  SHA-256 de tupla JSON ['dwp:wager:v1',scope,provider,identity], primeiros64bits assinados.
+  Tupla evita colisões por concatenação ambígua. Hash aqui endereça lock; hash do payload
+  usa todos256bits e tem função diferente. Colisão de64bits só serializa operações
+  adicionais, não mistura identidades, que são conferidas por valores exatos/UNIQUE.
+- `MikroWagerAdmissionRepository.constructor(session)` armazena sessão; `lock(providerId,
+  idempotencyKey,externalTransactionId):Promise<void>` chama guarda de ordem, calcula
+  dois endereços, elimina colisão idêntica, ordena numericamente (comparador bigint)
+  e chama pg_advisory_xact_lock(?::bigint) sequencialmente. Strings só em parâmetros.
+  PostgreSQL libera no commit/rollback; não é lock de sessão/pool nem lock global.
+  SQL/guarda falham explicitamente. IDs devem vir da admissão validada.
+
+`FinancialSession.beforeWagerAdmission():void` em financial-session.ts exige sessão
+ativa, uma admissão por UOW e nenhuma aquisição prévia de lock/escrita de Wallet.
+beforeLock e attachWallet(locked=true) passam a registrar esse estágio; não mudam
+ownership nem ordem lexical anterior entre wallets. Ler uma Wallet sem lock não
+marca escrita. Repositórios são internos: o fluxo deve também admitir antes de inserir
+WagerTransaction; os locks advisory são um protocolo cooperativo, UNIQUE é a garantia
+mesmo para escritor que não participe dele.
+
+`createRepositories(session):FinancialRepositories` e a interface correspondente
+agora incluem wagerAdmission/wagerResults na mesma sessão/EntityManager dos demais.
+Construir adaptadores não consulta tabela nova, preservando suites das migrations1–4.
+
+### Testes e suporte
+
+`infra/test/bet-support.ts`: `withBetDatabase(run:(BetDatabase)=>Promise<void>)` aplica
+até00005 em banco descartável, cria ORM com papel app/UOW, executa callback e fecha
+ORM no finally. Erros não são suprimidos. `assertReconciled(sql:SQL):Promise<void>`
+compara todas Wallets com SUM(CREDITamount-DEBITamount), incluindo saldo zero sem
+ledger; exige nenhuma diferença via SQL numeric. `gate()` retorna ready/open; executor
+da Promise captura resolve. `bounded<T>(promise):Promise<T>` watchdog8s e limpeza de
+timer. `observeWait(sql,query:string):Promise<void>` consulta pg_stat_activity e
+pg_blocking_pids no banco atual até6s, polling10ms; servidor deve mostrar bloqueador
+de outro PID, caso contrário lança. Timer não é evidência de concorrência.
+
+`infra/test/bet-persistence.test.ts`: callbacks async Promise<void> com banco real,
+assertions/erro/timeout falham; helper `rejected(id,walletId):WagerTransaction` usa
+factory real+reject(INSUFFICIENT_FUNDS) para fixture com saldozero, sem simular SQL.
+
+| Teste | Fluxo e garantia |
+|---|---|
+| result migration up down reapply... | Cria rejeição legada na00004, aplica00005duas vezes, verifica snapshot vazio/registro preservado; down mantém Wallet, up recria tabela vazia; reconcilia. |
+| result repository persists immutable rejected snapshot... | Persiste rejeição+snapshot real, roundtrip congelado, inexistente=null, duplicado23505; app/owner recusam alterações; saldo/moeda/status/failure/versão divergentes falham; reconcilia. |
+| terminal BET without result fails... | Callback conclui sem resultado mas commit23514; nenhum registro parcial; SQL com JSON ausente/dinheiro numérico/escala3recusado; reconcilia. |
+| admission lock serializes %s... (key/external) | A segura identidades; B mesma chave ou identidade externa espera observada no servidor; outro provedor prossegue; rollbackA liberaB; finally libera barreiras e aguarda sessões. |
+| admission guard rejects repeat late or expired... | Guarda recusa repositório escapado, segunda admissão e admissão depois de lock Wallet; reconcilia banco vazio. |
+
+`test/wager-result-mapper.test.ts`: teste síncrono `wager result mapper refuses...`
+compara snapshot válido e recusa versão futura, contador inseguro, identidade diferente,
+null, PENDING, dinheiro number/não normalizado e REJECTED sem código. Casts só simulam
+dados não confiáveis do driver; não são usados para burlar validação de produção.
+
+Teste de migration em `infra/test/messaging-schema.test.ts` agora passa explicitamente
+`to:Migration20261023000004` nos dois up: testa a etapa de mensagens, sem aplicar00005
+acidentalmente. Cobertura da nova migration fica na suite nova.
+
+Problemas corrigidos: TypeScript exigiu anotar o snapshot de fixture para preservar
+o tipo terminal; SQL exigiu parênteses em `(p->'balance') - ARRAY[...]` para desambiguar
+operadores JSONB. Depois da correção:6 testes reais/51assertions aprovados. Canonicalização
+e snapshot são infraestrutura para replay; o caso de uso será integrado a seguir.

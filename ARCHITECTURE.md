@@ -883,3 +883,28 @@ não são admitidos por este contrato BET; outros kinds aguardam autorização p
 Alternativas: serializar o input inteiro dependeria da ordem/metadata; hashear apenas
 valor/carteira deixaria passar mudanças relevantes. Hash não é autenticação. Limite
 monetário igual ao schema é validado antes de I/O, mantendo Money intacto.
+
+## ADR-022 — Snapshot original e locks de admissão
+
+Aprovado pelo usuário: tabela wager_transaction_results com resposta v1 imutável,
+PK/FK da WagerTransaction e wallet_version como metadado. Rejeições não têm ledger;
+saldo atual não serve para replay. Alternativa de colunas na WagerTransaction exigiria
+alterar entidade e guardas existentes. Snapshot separado mantém domínio aprovado e
+justifica redundância de status/moeda para contrato histórico, conferida por trigger.
+BEFORE INSERT captura estado sob NO KEY UPDATE; PROCESSED confere ledger. Exigência
+de snapshot para BET terminal nova é diferível. Nenhum backfill inventado para legado;
+ausência de resultado deve ser erro explícito, nunca débito/rejeição reexecutado.
+
+Advisory transaction locks por (provider,key) e (provider,externalId), escopos distintos,
+endereços SHA-256 truncados para64bits assinados, ordenados numericamente. Colisões
+podem gerar espera extra; valores exatos/UNIQUE continuam soberanos. O protocolo é
+admissão → Wallet NO KEY UPDATE → escritas → resultado/Outbox → commit. Futura Inbox
+deve ser adquirida antes da admissão, na mesma UOW. Uma operação por UOW evita ordem
+invertida entre pares. Nenhum lock global. Alternativa INSERT de reserva foi discutida:
+UNIQUE/FK antes do lock exigiria resolver disputas e transações abortadas; a ordem
+escolhida permite resolver replay/conflito antes de tocar Wallet. Escritores fora do
+protocolo ainda são limitados pelas constraints, mas não recebem automaticamente a
+taxonomia de conflitos do caso de uso.
+
+Referências: [locks PostgreSQL](https://www.postgresql.org/docs/17/explicit-locking.html)
+e [advisory transaction locks](https://www.postgresql.org/docs/17/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS).

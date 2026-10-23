@@ -237,3 +237,8 @@ locks PostgreSQL por duas identidades antes da Wallet, erros de admissão para v
 inválidos e até3 tentativas para40P01/40001. Persistência/replay, processamento, provas
 concorrentes e rollback ainda serão implementados nos incrementos seguintes. Sem HTTP,
 consumer/publisher, outros kinds ou alterações no banco principal.
+
+Segundo incremento BET: migration00005 resultados imutáveis, mapper/repositório,
+locks por identidade e portas na UOW. Up/down e regras SQL validados em descartáveis;
+não há backfill fictício nem alteração de entidades. Processamento/replay serão
+integrados no incremento seguinte; este suporte sozinho não executa apostas.
