@@ -5443,3 +5443,36 @@ Regressões BET40/CreateWallet25 atualizadas somente nas expectativas antigas de
 inexistente: agora requisição sem contrato deve retornar400. Logs multiprocesso são
 preservados; parse do relatório final foi adaptado. Métricas de resultado do consumidor
 são incrementadas após UOW confirmar, para não contar rollback como resultado final.
+
+## 44. Provas finais entre processos e migrations
+
+`infra/test/distributed.test.ts`: `child(entry:string,env:Record)` inicia Bun real e
+retorna Subprocess; `waitFor(predicate:()=>Promise<boolean>,timeout)` observa condição
+até deadline e falha explicitamente, sem considerar sono prova de sucesso. `stop`
+envia SIGTERM, aguarda saída limitada e usa SIGKILL no cleanup se necessário;
+Nest reemite SIGTERM após shutdown (143), workers encerram com 0. `startApi` escolhe
+porta livre, inicia main.ts e espera readiness HTTP; `post` envia contrato JSON com
+header para uma API. Helpers são usados exclusivamente pelos três testes do arquivo:
+
+1. Três PIDs de API, 50 operações iguais → um efeito e 49 replays; BET80+80 contra100
+   → um sucesso/uma rejeição/saldo20; REFUND versus ROLLBACK → uma compensação;
+   outra carteira avança com a primeira bloqueada; restart preserva replay histórico.
+2. Três consumers bloqueados na Wallet são mortos antes do commit. SQL confirma zero
+   Inbox e saldo100; após restart há três Inbox processadas, saldo20 e um débito.
+   Dois publishers reais drenam a Outbox. Reconciliação confirma a contabilidade.
+3. Worker real publica porta de health: live/ready/metrics respondem e SIGTERM drena.
+
+`delivery-migrations.test.ts` tem dois testes reais: dez migrations, reaplicação vazia,
+down completo em banco vazio, up novamente, usuário sem privilégios DDL; downgrade
+com ROLLBACK terminal falha55000 e todo o lote down é revertido, preservando as dez
+linhas de histórico e o saldo. Usa `Migrator.getExecuted()` da versão7. A execução
+SQL de negação usa `expectSqlState(async()=>await query,'42501')`: Bun.SQL é lazy;
+passar Query diretamente ao matcher de Promise não iniciava a consulta. O teste foi
+corrigido para aguardar SQL de fato; nenhum timeout foi ocultado/desabilitado.
+
+`infra/test/sqs.test.ts::queues` inclui a fila de eventos no retorno; verifyTopology
+valida seus atributos FIFO e requireEmpty recusa restart se qualquer das três filas
+tiver mensagens, inclusive em voo. Nunca apaga mensagens de terceiros para testar.
+`eslint.config.mjs` aplica recommended do typescript-eslint; somente o teste de
+contratos HTTP permite any para respostas JSON heterogêneas. Produção continua strict.
+Comandos: `bun run lint`, `bun run test:distributed`, `bun run test:delivery-migrations`.

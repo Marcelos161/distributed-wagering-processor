@@ -19,11 +19,12 @@ async function sqs(): Promise<SQSClient> {
   });
 }
 
-async function queues(client: SQSClient): Promise<{ source: string; dlq: string }> {
+async function queues(client: SQSClient): Promise<{ source: string; dlq: string; events: string }> {
   const source = await client.send(new GetQueueUrlCommand({ QueueName: 'wager-transactions.fifo' }));
   const dlq = await client.send(new GetQueueUrlCommand({ QueueName: 'wager-transactions-dlq.fifo' }));
-  if (!source.QueueUrl || !dlq.QueueUrl) throw new Error('Missing required queue URL');
-  return { source: source.QueueUrl, dlq: dlq.QueueUrl };
+  const events = await client.send(new GetQueueUrlCommand({ QueueName: 'wager-events.fifo' }));
+  if (!source.QueueUrl || !dlq.QueueUrl || !events.QueueUrl) throw new Error('Missing required queue URL');
+  return { source: source.QueueUrl, dlq: dlq.QueueUrl, events: events.QueueUrl };
 }
 
 async function attributes(client: SQSClient, url: string): Promise<Record<string, string>> {
@@ -36,7 +37,8 @@ async function verifyTopology(client: SQSClient): Promise<void> {
   const urls = await queues(client);
   const source = await attributes(client, urls.source);
   const dlq = await attributes(client, urls.dlq);
-  for (const actual of [source, dlq]) {
+  const events = await attributes(client, urls.events);
+  for (const actual of [source, dlq, events]) {
     expect(actual['FifoQueue']).toBe('true');
     expect(actual['ContentBasedDeduplication']).toBe('false');
     expect(actual['VisibilityTimeout']).toBe('30');

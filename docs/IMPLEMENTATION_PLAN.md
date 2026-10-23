@@ -320,3 +320,11 @@ substitui as pausas históricas descritas acima, sem autorizar destruição do p
 Fase2 da missão final: worker de referências e migration00009 entregues. Nove testes
 reais aprovados, incluindo crash do processo e recuperação, saldo relido e expiração.
 Avançar automaticamente para API HTTP, sem aplicar migrations ao principal.
+
+Fases3–7 da missão final: HTTP completo, consumer/Inbox/ACK pós-commit, publisher com
+lease recuperável, reconciliação/observabilidade e provas distribuídas implementadas.
+Três APIs e três consumers reais foram exercitados, incluindo SIGKILL antes do commit;
+os cenários após commit/antes de ACK e após envio/antes de publishedAt estão nas suítes
+de consumer e publisher. Dez migrations reexecutam e revertem em banco vazio; dados
+incompatíveis bloqueiam downgrade. Fase8/9: instalação limpa, documentação e regressão
+integral em fechamento; nenhuma autorização adicional é necessária para concluí-las.
