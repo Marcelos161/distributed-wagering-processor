@@ -868,3 +868,18 @@ resultado quando a conexão cai exatamente após confirmação do servidor.
 Referências primárias: [unicidade PostgreSQL](https://www.postgresql.org/docs/17/index-unique-checks.html),
 [constraints diferíveis](https://www.postgresql.org/docs/17/sql-set-constraints.html),
 [UUID e crypto](https://nodejs.org/api/crypto.html#cryptorandomuuidoptions).
+
+## ADR-021 — Contrato canônico de admissão BET
+
+prepareBet valida o DTO de transporte e produz Money/input imutáveis e SHA-256 de
+JSON UTF-8. Lista explícita de campos em ordem lexicográfica, também em money;
+externalTransactionId, gameId, kind, money, playerId, providerId, roundId, walletId.
+Exclui idempotencyKey e metadata: a chave localiza a operação, o hash compara conteúdo.
+Normaliza dinheiro por Money.toJSON sem number, sem trim/case folding de IDs. Não é
+RFC8785 genérico nem hash de todo body. Outra política futura requer versão explícita
+e compatibilidade com registros existentes. OPENING/provider interno e referências
+não são admitidos por este contrato BET; outros kinds aguardam autorização própria.
+
+Alternativas: serializar o input inteiro dependeria da ordem/metadata; hashear apenas
+valor/carteira deixaria passar mudanças relevantes. Hash não é autenticação. Limite
+monetário igual ao schema é validado antes de I/O, mantendo Money intacto.

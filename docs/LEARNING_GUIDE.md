@@ -3883,3 +3883,70 @@ para o cliente; não prometemos replay HTTP ou recuperação dessa janela nesta 
 Próxima etapa recomendada: adaptador HTTP de criação de carteira com contrato/erros
 e autenticação do README, mediante autorização específica. Desenvolvimento encerrado
 no caso de uso de aplicação e seus testes.
+
+## 26. Admissão e JSON canônico de BET
+
+Primeiro incremento da etapa ProcessWagerTransaction: preparar uma entrada independente
+de HTTP/SQS. Ainda não executa débito nem oferece replay. O header Idempotency-Key será
+extraído pelo futuro adaptador HTTP e entregue como idempotencyKey; messageId identifica
+uma entrega do broker e não substitui essa chave financeira.
+
+JSON canônico significa que a mesma informação produz a mesma sequência de bytes.
+Neste contrato fechado v1, construímos uma lista explícita de campos em ordem
+lexicográfica, incluindo as chaves internas de money. Não usamos a ordem do objeto
+recebido, nem um serializador genérico que possa incluir headers por acidente.
+Entram: externalTransactionId, gameId, kind, money(amount,currency), playerId,
+providerId, roundId e walletId. Cada campo altera a identidade ou o significado da
+aposta. Ficam fora idempotencyKey, messageId, datas de transporte, correlationId e
+campos extras de transporte. Chave identifica a tentativa lógica; hash compara seu
+conteúdo. Identidade externa identifica a operação no provedor, mesmo com outra chave.
+
+Money.from exige duas casas e mantém precisão; toJSON normaliza zeros à esquerda.
+Assim,25.00 e00025.00 têm o mesmo hash. SHA-256 fornece digest determinístico de256bits
+em64 caracteres hexadecimais; não autentica o provedor nem cifra seu payload. Os bytes
+são JSON UTF-8. Não normalizamos IDs com trim ou conversão de caixa: token inválido
+é erro e identificadores distintos permanecem distintos.
+
+### Funções e contratos
+
+Em `src/application/wagering/prepare-bet.ts`:
+
+- `BetInput`: DTO readonly com sete identificadores string, kind literal BET e
+  money:Readonly<MoneyProps>. Não contém headers/envelope nem tipos de ORM.
+- `PreparedBet`: input normalizado readonly, Money imutável, canonicalPayload:string
+  e payloadHash:string. O caso de uso consumirá essa preparação por execução.
+- `InvalidWagerInputError.constructor(message:string)`: retorna Error com name próprio
+  e code INVALID_WAGER_INPUT; usado pelos dois helpers, sem I/O. O futuro transporte
+  traduzirá essa admissão inválida, que não é REJECTED financeira persistida.
+- `assertToken(value:unknown,field:string):asserts value is string`: helper privado;
+  exige string não vazia sem espaços/controles. Lança InvalidWagerInputError indicando
+  campo. Chamado pelo loop de prepareBet, sem normalizar o identificador.
+- `prepareBet(input:BetInput):PreparedBet`: valida objeto; percorre sete IDs (incluindo
+  chave obrigatória); bloqueia o provider internal:wallet-opening reservado; exige BET
+  e ausência de referência externa; chama Money.from e exige positivo/até o teto do
+  schema; constrói business ordenado; JSON.stringify; createHash('sha256') UTF-8;
+  retorna cópias congeladas, incluindo money no DTO. Não conserva objetos mutáveis
+  da entrada. MoneyError é propagado para formato/moeda; erros de crypto propagam.
+  Não há banco/Nest/ORM; dependências são Money e node:crypto. Exemplo: provider-a,
+  bet-1, player, wallet, round, game,25.00BRL gera
+  `3453cc106ee4d196dbb10fd6695becbdd4ef529164a71d899a4b72358b93cba7`.
+
+### Testes do contrato
+
+`test/bet-payload.test.ts`, describe canonical BET payload: callbacks síncronos void,
+sem infraestrutura; assertions lançam em divergência. input é fixture readonly.
+
+| Teste | Parâmetros, fluxo e garantia |
+|---|---|
+| sorts known keys... | Compara JSON exato e hash calculado independentemente com Python json(sort_keys=True)/hashlib; valida algoritmo e escala textual. |
+| ignores original key ordering... | Reordena chaves externas/internas, muda chave, acrescenta metadata, usa00025.00; exige hash igual. |
+| changing %s changes... (6) | field: providerId/externalTransactionId/playerId/walletId/roundId/gameId; altera um por vez e exige hash diferente. |
+| changing money %j... (2) | money:MoneyProps; muda quantia ou moeda e exige hash diferente. |
+| captures immutable normalized input... | Prepara cópia de entrada, altera origem depois; Money/input conservam valores e três níveis relevantes estão congelados. |
+| rejects missing or malformed %s (7) | field:string; testa vazio/espaço/controle/undefined/number para cada ID; todos devem lançar. |
+| rejects invalid or inadmissible amount %s (6) | amount:string em zero,negativo,escala3,exponencial,NaN,acima do teto; nenhum é admitido. |
+| rejects unsupported currency... | Testa moeda desconhecida, dinheiro number, WIN/OPENING, referência, provider interno e inputnull/array/undefined. |
+
+Evidência deste incremento: typecheck OK;25 testes aprovados,66 assertions. Nenhuma
+mudança em entidades ou schema. Decisões de snapshot/locks/retry aprovadas para os
+próximos incrementos, ainda não provadas por este teste puro.

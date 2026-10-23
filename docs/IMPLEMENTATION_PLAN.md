@@ -230,3 +230,10 @@ apostas, publisher/consumer, replay HTTP e referências permanecem em etapas pr�
 Etapa CreateWallet concluída: **535 testes distintos aprovados**, typecheck/build OK.
 Banco principal sem tabelas financeiras e nenhum banco dwp_test_* remanescente.
 Nenhum push. As etapas seguintes continuam dependendo de nova autorização.
+
+Etapa BET autorizada após CreateWallet: começa pela canonicalização de admissão
+(seção26 do guia/ADR-021). Usuário aprovou snapshot imutável separado e versionado,
+locks PostgreSQL por duas identidades antes da Wallet, erros de admissão para vínculos
+inválidos e até3 tentativas para40P01/40001. Persistência/replay, processamento, provas
+concorrentes e rollback ainda serão implementados nos incrementos seguintes. Sem HTTP,
+consumer/publisher, outros kinds ou alterações no banco principal.
