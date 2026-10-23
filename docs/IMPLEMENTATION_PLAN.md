@@ -162,3 +162,10 @@ lock. Primeiro incremento: mappers explícitos e roundtrip com PostgreSQL descar
 sem mudanças nas entidades ou migrations. Repositórios, atomicidade via MikroORM e
 concorrência ainda serão validados nos incrementos seguintes. Não autoriza endpoints,
 processadores, Inbox/Outbox operacionais ou publicação.
+
+Segundo incremento complementar à etapa8: portas e adaptadores financeiros SQL
+parametrizados via EntityManager, conforme aprovação. Gravação explícita por movimento,
+lookup com escopo do provedor, ledger só INSERT/SELECT, sessão/ownership e leitura com
+FOR NO KEY UPDATE. Testes dos adaptadores usam transactional oficial em bancos
+isolados. Próximo incremento nesta autorização: unidade transacional injetável e
+provas concorrentes de espera/liberação/saldo atualizado, sem casos de uso públicos.

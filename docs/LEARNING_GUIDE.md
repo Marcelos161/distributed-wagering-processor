@@ -2975,3 +2975,112 @@ Validação do incremento de mappers: `bun run check` com DATABASE_URL local pas
 ./infra/test/persistence-mappers.test.ts`: 2/2; `bun run test:financial`: 34/34.
 A primeira tentativa do check sem DATABASE_URL falhou na inicialização HTTP;
 a execução correta usou a configuração local documentada, sem modificar o teste.
+
+## 18. Portas, repositórios e sessão financeira
+
+Uma **porta** declara o que a aplicação precisa; um **adaptador** implementa isso
+com tecnologia concreta. `src/application/ports/financial-persistence.ts` declara
+WalletRepository, WagerTransactionRepository, LedgerEntryRepository e o callback de
+FinancialUnitOfWork. O domínio não os importa. `FINANCIAL_UNIT_OF_WORK` é símbolo de
+DI, sem dependência de Nest. `PersistedLedgerEntry` é entry + versão de armazenamento.
+Não criamos repositório genérico: cada operação nomeia uma intenção permitida.
+
+Um **Repository** recupera/agrega objetos persistidos. Aqui ele chama mapper e SQL
+parametrizado no EntityManager. O banco recebe parâmetros separados do texto SQL;
+por exemplo, um ID contendo aspas não vira uma condição SQL. Os métodos async
+retornam Promise; erros dos mappers, domínio, sessão e PostgreSQL propagam. Quem
+utiliza agora são fixtures de integração; futuramente, casos de uso dentro da unidade
+transacional. Os construtores dos três adaptadores recebem `session: FinancialSession`,
+guardam a referência e retornam a instância; não abrem conexão/transação.
+
+### Catálogo dos adaptadores (pasta src/infrastructure/persistence/financial)
+
+| Arquivo / método | Parâmetros → resultado resolvido | SQL, fluxo e motivo |
+|---|---|---|
+| `wallet-repository.ts` / `findById` | `id:string → Wallet|null` | SELECT pela PK; usa read sem lock. Snapshot de consulta, não base autorizada para save. |
+| mesmo / `findByPlayerAndCurrency` | `playerId,currency:string → Wallet|null` | SELECT pela chave UNIQUE; read sem lock. Ex.: carteira BRL do jogador. |
+| mesmo / `findByIdForUpdate` | `id:string → Wallet|null` | beforeLock verifica ordem; SELECT explícito FOR NO KEY UPDATE; read reidrata **novo objeto** depois da aquisição. Não serve objeto antigo do Identity Map. Ausência retorna null e não bloqueia uma futura criação inexistente; UNIQUE protege essa criação. |
+| mesmo / `read` privado | `sql:string, parameters:string[], locked:boolean → Wallet|null` | Executa, retorna null sem linha ou mapeia e associa objeto à sessão; não gera identidade. Compartilhado pelas três buscas. |
+| mesmo / `insert` | `wallet:Wallet → void` | Associa ownership, mapeia e INSERT dos sete campos. Wallet positiva só poderá confirmar com OPENING/ledger. PK/UNIQUE/CHECK/FK/trigger podem rejeitar. |
+| mesmo / `save` | `wallet:Wallet → void` | Obtém versão previamente lida sob lock, exige um avanço, mapeia; UPDATE balance/version/updated_at WHERE id/version RETURNING id; zero linhas gera erro; sucesso atualiza versão rastreada. Um crédito R$0,10 em 100.00/v1 escreve 100.10/v2. Não atualiza identidade. |
+| `wager-transaction-repository.ts` / `findById` | `id:string → WagerTransaction|null` | SELECT PK por read. |
+| mesmo / `findByExternalId` | `providerId,externalId:string → WagerTransaction|null` | SELECT com os dois campos da chave UNIQUE; provedor distinto não recupera transação alheia. |
+| mesmo / `findByIdempotencyKey` | `providerId,key:string → WagerTransaction|null` | SELECT pelo espaço de chaves do provedor. É lookup, não idempotência/replay completos. |
+| mesmo / `read` privado | `sql:string, parameters:string[] → WagerTransaction|null` | Executa, mapeia se existir e associa objeto à sessão. |
+| mesmo / `insert` | `transaction:WagerTransaction → void` | Associa objeto; mapper fornece os 18 campos do INSERT. Aceita snapshot coerente permitido no schema; PROCESSED financeiro exige ledger antes do commit. |
+| mesmo / `updateLifecycle` | `transaction:WagerTransaction → void` | Exige objeto carregado/inserido nesta sessão; UPDATE somente status, reference_transaction_id, failure_code, processed_at; exige RETURNING. Trigger recusa terminal/no-op/transição proibida; input original não é reescrito. |
+| `ledger-entry-repository.ts` / `insert` | `entry:WalletLedgerEntry, walletVersion:number → void` | Mapper e INSERT de dez campos; banco garante equação, unicidade e relação com wallet/transação. Não existe save/delete. |
+| mesmo / `listByWalletId` | `walletId:string → readonly PersistedLedgerEntry[]` | SELECT filtrado, ORDER BY wallet_version ASC,id ASC; mapeia cada linha e congela array. Vazio é []; IDs lexicais não substituem ordem financeira. Ainda sem paginação; não expor lista ilimitada em endpoint. |
+| `create-repositories.ts` / `createRepositories` | `session:FinancialSession → FinancialRepositories` | Constrói os três adaptadores com a **mesma** sessão e congela envelope. Chamado pelo executor transacional; não abre transações individuais. |
+
+### Catálogo de FinancialSession
+
+Arquivo `financial-session.ts`; depende do EntityManager PostgreSQL e tipos do domínio.
+É mecanismo interno do adaptador, não porta para SQL livre na aplicação.
+
+| Método | Parâmetros / retorno | Passos e erros |
+|---|---|---|
+| constructor | `em:EntityManager → instância` | Armazena EM e chama assertActive; rejeita manager fora de transação. |
+| assertActive | `() → void` | Exige flag ativa e em.isInTransaction; erro se expirou ou não há SQL transaction. Chamado por operações da sessão. |
+| close | `() → void` | Marca encerrada; chamador usa finally ao terminar callback. Repositório escapado deixa de funcionar. |
+| execute | `<T extends object[]>(sql:string, parameters:readonly unknown[]=[]) → Promise<T>` | Verifica escopo, copia parâmetros e chama em.execute. O MikroORM usa getTransactionContext para encaminhar à conexão transacional. Não usa connection.execute sem contexto. |
+| beforeLock | `id:string → void` | Verifica atividade e ordem crescente vs último ID; registra ID; erro se ordem inversa. Mesmo ID pode ser consultado novamente, produzindo snapshot novo. |
+| attachWallet | `wallet:Wallet,locked:boolean → void` | WeakMap global só identifica a sessão dona do objeto; recusa dono anterior; mapa local registra lock e versão. Leituras/insert/save usam esse método. Não impede consulta por outro processo: isso é trabalho do banco. |
+| versionBeforeSave | `wallet:Wallet → number` | Exige objeto local com lock e exatamente versão anterior+1. Erra se não carregado, lido sem lock ou dois movimentos acumulados. Não modifica o objeto. |
+| saved | `wallet:Wallet → void` | Após UPDATE bem-sucedido, reassocia com versão atual e lock mantido. |
+| attachTransaction | `transaction:WagerTransaction → void` | Registra ownership; recusa instância de sessão anterior. Chamado por leitura/insert. |
+| assertTransaction | `transaction:WagerTransaction → void` | Confirma ownership/atividade antes de atualizar lifecycle; não permite objeto avulso substituir estado existente. |
+
+O Unit of Work **interno do ORM** calcula diferenças entre entidades gerenciadas e
+emite SQL no flush. Nosso domínio usa campos privados/factories e os adaptadores
+escrevem SQL imediatamente; essas entidades **não estão registradas nesse Unit of
+Work nem no Identity Map**. Assim, `flush()` não salva uma Wallet só porque ela foi
+mutada: chamar `save` é obrigatório. Não confundir essa estratégia aprovada com o
+mapeamento automático de uma EntitySchema. O commit continua sendo do MikroORM/SQL.
+
+### Fixtures e testes de repositórios
+
+`infra/test/persistence-support.ts` não é importado por src. Todas as funções async
+retornam Promise e propagam erros; nenhum fixture publica evento:
+
+- `withPersistenceDatabase(run:(FinancialDatabase & {appOrm:MikroORM})=>Promise<void>)`:
+  chama helper descartável existente, aplica três migrations como owner, inicializa
+  **outro ORM com applicationUrl**, chama run e fecha appOrm em finally. Retorna void.
+- `inRepositoryTransaction<T>(orm,work:(FinancialRepositories)=>Promise<T>):Promise<T>`:
+  fork novo/limpo, transactional oficial, sessão e três repos; retorna callback;
+  fecha sessão em finally. Testa adaptadores antes da unidade transacional pública.
+- `persistOpening(repos,id='wallet-1',amount='100.00'):Promise<Wallet>`: Money, factory
+  OPENING, Wallet.open com IDs de fixture, markProcessed; grava wallet → tx → ledger;
+  devolve wallet. Assume amount positivo; abertura zero não é finalidade do helper.
+- `persistCredit(repos,wallet,id,amount='0.10'):Promise<void>`: cria WIN PENDING,
+  insere, wallet.credit, save, markProcessed/updateLifecycle, insere ledger/versão.
+  Cada chamada gera um UPDATE; datas fixas incluem `.123` para testar precisão.
+
+`infra/test/persistence-repositories.test.ts` contém callbacks sem argumentos →
+Promise<void>, sempre em banco descartável:
+
+1. `repositories share SQL transaction and preserve exact opening and ordered movements`:
+   abertura+dois créditos; exige 100.30/v3, milissegundos, buscas em todas as chaves,
+   ausência/null, ID com aspas parametrizado e histórico [v1,v2,v3] mesmo com IDs fora
+   da ordem lexical. Confirma usuário app via SQL. Não prova replay.
+2. `wallet saves require fresh ownership, lock and exactly one movement`: recusa Wallet
+   anterior e snapshot sem lock, obtém objeto novo/saldo persistido, recusa dois créditos
+   acumulados antes de save. Mutações recusadas ficam apenas na memória.
+3. `repository scope expires and rejects nontransactional managers and reversed lock order`:
+   recusa sessão sem transação, ordem z→a e acesso a repos depois do callback.
+
+Os testes falham em qualquer erro/assertion inesperado. Não relaxam constraints nem
+migrations. Testes de espera concorrente observável e rollback da unidade completa
+serão executados no próximo incremento; um SELECT FOR NO KEY UPDATE isolado não é
+prova suficiente da coordenação de duas operações.
+
+4. `ledger order uses numeric version rather than textual 1,10,11,2 order`: callback
+async sem parâmetros; cria abertura e 11 créditos, confirma versões 1..12 em sequência.
+O primeiro teste encontrou ORDER BY ambíguo ao selecionar `*` e versão convertida com
+mesmo nome. Corrigimos projeção explícita e ordenamos pela coluna **numérica qualificada**
+`wallet_ledger_entries.wallet_version`, não pelo alias texto. Nenhuma migration mudou.
+
+Validação dos repositórios: typecheck/build e 424 testes existentes+unitários passaram;
+`bun run test:persistence` passou 6 testes (2 mappers + 4 repositórios), em PostgreSQL
+real descartável. A abstração de unidade transacional da aplicação ainda não estava
+implementada neste commit; os testes usam diretamente EntityManager.transactional.

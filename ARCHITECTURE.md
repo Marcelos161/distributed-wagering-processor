@@ -642,3 +642,37 @@ mudança no domínio nem repetição de transições. Ledger transporta walletVe
 envelope separado; datas e referências são preservadas. A alternativa de decorators
 no domínio foi descartada para preservar encapsulamento e isolamento. A estratégia
 específica de escrita dos repositórios será registrada no próximo incremento.
+
+## ADR-014 — Repositórios SQL pelo EntityManager transacional
+
+Escolha aprovada pelo usuário: SQL parametrizado via `em.execute`, dentro de
+`EntityManager.transactional`, com mappers explícitos. Alternativa: EntitySchemas
+separados e dirty checking com flush a cada movimento. Escolhemos escrita explícita
+para preservar um UPDATE por saldo/versão e controlar a ordem exigida pelas FKs e
+triggers, evitando que dois movimentos sejam condensados pelo Unit of Work do ORM.
+Trade-off: escrevemos/manutenimos SQL e mappers; não usamos identity map/dirty checking
+para estas entidades. Não substituímos o driver/transações oficiais por outro cliente.
+
+Portas em application/ports não importam Nest/MikroORM. Adaptadores na infraestrutura
+recebem a mesma FinancialSession, que exige EM dentro de transação e fecha no fim do
+escopo. Nenhuma porta expõe SQL arbitrário, delete financeiro ou update do ledger.
+Leituras por unicidade retornam objeto/null; histórico ordena por wallet_version,id.
+Status é atualizado apenas nos quatro campos de lifecycle. Falhas SQL propagam,
+sem tratar colisão UNIQUE como sucesso ou implementar replay antecipadamente.
+
+Wallet carregada sem lock é apenas snapshot para leitura. `findByIdForUpdate` consulta
+novamente com FOR NO KEY UPDATE, sem reutilizar objetos de leitura; mantém lock até
+fim SQL. `save` exige objeto desta sessão, lock/inserção local e version anterior+1,
+usa WHERE id/version e exige um RETURNING. Múltiplos movimentos exigem save após cada
+um e respectivos ledgers. INSERT de wallet nova já detém proteção de escrita.
+WeakMaps guardam propriedade de objetos, não coordenam processos; exclusão real vem
+exclusivamente do PostgreSQL. Wallet/Transaction de uma sessão anterior devem ser
+recarregadas mesmo após sucesso; rollback não restaura objetos JavaScript.
+
+Locks de wallets existentes devem preceder decisões e escritas; adquirir IDs em ordem
+crescente (comparação lexical JS, a mesma em todos os chamadores). A sessão recusa
+inversão. Isso reduz deadlocks, não elimina toda possibilidade (outros recursos e
+escritores externos existem). Para abertura, ordem wallet → transação → ledger;
+referências processadas precisam existir antes de atualizar/inserir dependente.
+Futuras operações com várias wallets devem adquirir todos os locks primeiro; esta
+etapa não oferece um caso de uso de transferência. Não há lock global ou mutex.
