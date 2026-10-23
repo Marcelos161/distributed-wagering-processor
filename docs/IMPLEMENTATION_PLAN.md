@@ -187,3 +187,8 @@ Evidência final desta etapa: 483 testes distintos aprovados (424 aplicação/un
 15 persistência,34 schema,6 infraestrutura,2 ORM,2 migrations), typecheck/build OK.
 Trabalho dividido em mappers, repositórios+operação de lock e unidade transacional+
 provas concorrentes. Commits locais; sem push. As etapas seguintes continuam pendentes.
+
+Etapa eventos/Inbox/Outbox autorizada: primeiro incremento implementa quatro eventos
+v1 e envelope abstrato imutável. OPENING/aggregateId aprovados; nenhum publisher ou
+consumer iniciado. Próximos incrementos desta autorização: modelos, schema e integração
+transacional das mensagens, com testes descartáveis.

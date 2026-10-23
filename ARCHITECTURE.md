@@ -720,3 +720,14 @@ Referências: [MikroORM transactions](https://mikro-orm.io/docs/transactions),
 A implementação instalada 7.2.5 também foi inspecionada: SqlEntityManager.execute usa
 getTransactionContext; TransactionManager.executeTransactionFlow chama flush antes
 que Connection.transactional tente confirmar. Nenhuma migration foi alterada.
+
+## ADR-016 — Eventos de integração v1
+
+Aprovado: OPENING positiva emite WagerTransactionProcessed e WalletBalanceChanged;
+abertura zero não emite nenhum dos dois. Eventos de transação usam aggregateId=tx.id;
+BalanceChanged usa wallet.id. Todos carregam walletId para futura correlação/agrupamento.
+Alternativa discutida: omitir OPENING ou usar walletId como agregado de todos os eventos.
+Factories recebem entidades no estado correspondente e contexto explícito, sem gerar
+IDs/datas. Tipos e version=1 pertencem às classes. Money vira MoneyProps; payload e
+serialização são cópias recursivamente congeladas, Date é defensiva. Integração não
+significa publicação: as classes apenas descrevem fatos para posterior persistência.

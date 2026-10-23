@@ -3275,3 +3275,44 @@ sequenceDiagram
 Próxima funcionalidade recomendada: contratos de eventos e persistência transacional
 Inbox/Outbox, com nova autorização. Ainda faltam relay, consumers, replay HTTP,
 retry/TTL e casos de uso públicos. A integração desta etapa não prova essas partes.
+
+## 20. Integration Events v1
+
+Arquitetura orientada a eventos comunica fatos que já ocorreram. Domain Event descreve
+um fato interno do modelo; Integration Event é contrato serializável entre sistemas,
+com versão estável. Criar objeto ainda não publica nada: só a futura Outbox confirmada
+poderá ser publicada. Uma BET rejeitada gera Rejected, nunca BalanceChanged. LOSS
+processada gera Processed sem ledger/mudança de saldo. OPENING positiva gera Processed
++ BalanceChanged; abertura zero não gera esses eventos (decisão aprovada).
+
+Identidade: eventId identifica **uma ocorrência** e será reutilizado na redelivery;
+aggregateId identifica transação nos três eventos de transação e wallet em BalanceChanged;
+correlationId acompanha o fluxo inteiro; causationId opcional identifica sua causa
+(mensagem/comando/evento anterior); version=1 identifica formato, não a versão do saldo.
+IDs e occurredAt são fornecidos pelo chamador; não há relógio/UUID escondido. Todos os
+payloads incluem walletId. Hash de entrada/idempotencyKey não são expostos no evento.
+
+Catálogo (arquivos em `src/domain/messaging`; erros propagam ao chamador):
+
+| Função / classe | Parâmetros → retorno; fluxo, uso e erros |
+|---|---|
+| message-values.ts/assertIdentifier | string→void; rejeita vazio/espaços/controles com TypeError. Usado nas identidades de mensagens/contexto. |
+| timestamp | Date→number de milissegundos; exige Date finita; usado no armazenamento privado de datas. Número aqui é tempo, nunca dinheiro. |
+| immutableJson<T> | T, ancestors:Set<object> interno→T; copia arrays/objetos simples recursivamente, congela todos os níveis; recusa ciclos, Date, Money, bigint, undefined e números não finitos. Protege payloads sem conversões JSON silenciosas. Callbacks map percorrem filhos, propagando TypeError. |
+| integration-event.ts/IntegrationEvent<T>.constructor protected | IntegrationEventProps<T>→instância; valida IDs, copia timestamp e congela cópia de data. Base abstrata, chamada pelas quatro subclasses. |
+| occurredAt getter | ()→Date nova, preservando instante interno. Mutar a cópia não altera evento. |
+| toJSON | ()→IntegrationEventJSON<T>; envelope completo, ISO UTC, causationId ausente se não fornecido; cópia profundamente congelada. Chamado por JSON.stringify e Outbox. |
+| financial-events.ts/transactionData | tx:WagerTransaction,status esperado→TransactionEventData; exige instância/status, copia identidades, referências e money.toJSON. Erro se evento não corresponde ao estado. Helper das três factories. |
+| WagerTransactionProcessed.from | tx,ctx:EventContext→evento v1; exige PROCESSED, inclui LOSS/OPENING; aggregateId=tx.id. |
+| WagerTransactionRejected.from | tx,ctx→evento v1; exige REJECTED, inclui failureCode estável. FAILED não é rejeição de negócio. |
+| WagerTransactionPendingReference.from | tx,ctx→evento v1; exige PENDING_REFERENCE e preserva referência externa. |
+| WalletBalanceChanged.from | wallet:Wallet,entry:WalletLedgerEntry,ctx→evento v1; exige wallet/ledger compatíveis, saldo final igual e lançamento equilibrado; captura MoneyProps e walletVersion. Chamador deve passar o lançamento da movimentação corrente. |
+| construtores privados das quatro subclasses | props tipadas→instância; super valida/copia, campos fixam eventType/version, Object.freeze sela a superfície pública. Sem transições ou setters. |
+
+`test/integration-events.test.ts`: helper transaction(kind=BET,reference=false) cria
+entidades de teste, inclusive OPENING interna/LOSS zero. Callbacks test.each verificam
+Processed para BET/WIN/LOSS/OPENING; os demais verificam Rejected/Pending e transições
+recusadas, BalanceChanged/imutabilidade/datas, contexto/causationId e cópia JSON
+sem perda. Todos retornam void e lançam assertion em divergência. Nenhuma dependência
+Nest/ORM é importada pelo domínio. Exemplo: crédito10.00 BRL gera payload com
+`money:{amount:"10.00",currency:"BRL"}`, nunca uma instância Money ou valor binário.
