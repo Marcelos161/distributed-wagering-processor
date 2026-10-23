@@ -4400,3 +4400,48 @@ pendências operacionais, não garantias desta entrega.
 Próxima etapa recomendada, mediante autorização: ampliar o mesmo fluxo para WIN/LOSS
 com snapshots/eventos correspondentes e validação das referências aprovada. Não iniciar
 outros kinds ou transportes automaticamente. Desenvolvimento desta etapa termina em BET.
+
+## 30. Admissão compartilhada para BET, WIN e LOSS
+
+Aposta BET retira o valor apostado. WIN credita o prêmio, que pode ser diferente
+ desse valor. LOSS registra que a rodada foi perdida: debitar novamente cobraria
+ duas vezes a mesma aposta. Por isso LOSS exige `0.00` e não movimenta saldo.
+
+### Funções e contratos desta mudança
+
+- `WagerInput`/`PreparedWager` (`src/application/wagering/prepare-wager.ts`): DTO
+  readonly com kind BET/WIN/LOSS, IDs string, MoneyProps e referência externa
+  opcional. A saída acrescenta Money, JSON canônico e hash. Não são entidades ORM.
+- `prepareWager(input: WagerInput): PreparedWager`, no mesmo arquivo: usado pelo
+  processador e pelos testes. Confere objeto/IDs/namespace/kind; valida referência
+  somente em WIN, diferente do próprio externalId; constrói Money; exige positivo
+  para BET/WIN e zero para LOSS; verifica o teto persistível; monta campos de negócio
+  em ordem lexicográfica; serializa JSON UTF-8 e calcula SHA-256; congela cópias.
+  Dependências: Money e crypto, sem I/O. Erros: InvalidWagerInputError para contrato,
+  MoneyError para dinheiro inválido. Referência ausente não entra no JSON; referência
+  presente entra entre providerId e roundId. Exemplo: WIN 40.50 com referência bet-1
+  tem hash diferente da mesma WIN sem referência. idempotencyKey continua excluída.
+- `assertToken(value: unknown, field: string): asserts value is string`, privado no
+  mesmo arquivo: usado por prepareWager; rejeita vazio, tipo incorreto, espaços e
+  controles, sem normalizar IDs. Não retorna valor; lança InvalidWagerInputError.
+- `InvalidWagerInputError(message: string)`: construtor agora nesse arquivo,
+  preserva name/code e Error.message; os chamadores distinguem admissão inválida.
+- `prepareBet(input: BetInput): PreparedBet` (`prepare-bet.ts`): fachada compatível;
+  verifica BET antes de delegar à função comum e restringe o tipo de saída.
+  Continua recusando WIN e referências. O cast de saída só estreita o kind já
+  verificado. Preserva imports antigos e, principalmente, os bytes/hashes existentes.
+  Alternativa de renomear/remover a API quebraria consumidores sem benefício.
+
+### Testes de contrato
+
+`test/wager-payload.test.ts` tem fixtures sem infraestrutura. Cada callback retorna
+void; depende de expect/prepareWager e falha se a garantia nomeada não for cumprida.
+`generic canonicalizer preserves BET bytes and hash` compara a saída com prepareBet;
+`WIN reference is canonical...` verifica inclusão/ordem, hash, cópia e ausência;
+`invalid WIN reference %j` parametriza vazio/espaço/self/null/número;
+`WIN rejects amount %s` cobre zero/negativo/escala/teto;
+`LOSS requires exactly zero...` cobre zero, positivos/negativos, referência e kind
+fora do escopo; `kind participates...` prova que trocar BET por WIN muda o hash.
+Os 25 testes anteriores de BET continuam ativos, inclusive o hash independente
+`3453cc...cba7`. Execução: typecheck OK; 38 testes de payload, 88 assertions, zero falhas.
+Este incremento só prepara entrada; ainda não credita prêmios nem grava LOSS.

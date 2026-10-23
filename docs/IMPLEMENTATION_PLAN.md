@@ -253,3 +253,8 @@ Etapa BET concluída: **601 testes distintos aprovados**, typecheck/build OK. In
 contra 100. Banco principal sem tabelas financeiras; bancos descartáveis removidos.
 Nenhum push. Próxima etapa recomendada: WIN/LOSS pelo mesmo fluxo, após autorização.
 HTTP, consumer/publisher e demais operações continuam fora da entrega atual.
+
+Etapa WIN/LOSS autorizada: primeiro incremento compartilha canonicalização sem mudar
+hashes BET. Aprovados comprovante separado de pendência, rejeição auditável de referência
+inválida e rejeição de overflow do saldo. Persistência, processamento, testes reais e
+concorrência serão concluídos nesta etapa; worker de referências permanece fora dela.

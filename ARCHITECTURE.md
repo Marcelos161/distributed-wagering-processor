@@ -960,3 +960,19 @@ Essas injeções exercitam tratamento de falhas; não alegamos que provocam o de
 real de deadlocks. Os locks reais são observados nos testes concorrentes. Resta provar
 recuperação por queda abrupta de processo em janelas de publicação/ACK quando esses
 componentes existirem, além dos demais kinds e transportes.
+
+## ADR-024 — Extensão incremental para WIN/LOSS
+
+prepareWager compartilha validação/canonicalização; prepareBet permanece como fachada
+BET-only. Nenhum campo novo é inserido em hashes BET. WIN inclui referência opcional
+em ordem lexicográfica, LOSS exige zero. Reutilizamos domínio e um único processador.
+
+Decisões aprovadas para os próximos incrementos desta etapa: comprovante pendente
+imutável em tabela separada; replay pendente sem novo evento, resultado terminal
+preferido quando o futuro worker concluir. Alternativa: mudar a PK da tabela de
+resultados para histórico por estado; recusada para preservar o contrato terminal.
+Referência ausente/BET compatível não terminal aguarda; vínculos/kind incorretos ou
+BET rejeitada/falha geram INVALID_REFERENCE persistido. Lookup restrito ao provedor:
+ID que só existe em outro provedor é ausente, sem vazamento entre provedores.
+Crédito que ultrapassa o teto do saldo é rejeitado com DOMAIN_RULE_VIOLATION; Money
+e limite SQL permanecem intactos. Implementação e evidência seguem nos incrementos.
