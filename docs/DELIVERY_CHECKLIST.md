@@ -13,15 +13,15 @@ Os estados abaixo descrevem a auditoria inicial e serão atualizados com evidên
 | Domínio/repositórios Inbox e Outbox | IMPLEMENTADO E TESTADO | Atomicidade local, sem transporte operacional |
 | Referências pendentes: registro e replay | IMPLEMENTADO E TESTADO | Comprovante e resultado terminal separados |
 | Worker automático de referências | IMPLEMENTADO E TESTADO | 9 testes PostgreSQL, incluindo SIGKILL/restart/SIGTERM, retry e TTL |
-| HTTP financeiro, consultas e paginação | PENDENTE | Rotas exatas da seção 9 |
+| HTTP financeiro, consultas e paginação | IMPLEMENTADO E TESTADO | API3: sockets HTTP, SQL, paginação, erros e replay |
 | Consumer SQS / ACK pós-commit | PENDENTE | Inbox existente não prova consumer |
 | Publisher Outbox | PENDENTE | Claim, confirmação, retry e crash |
-| Reconciliação pública | PENDENTE | Asserções de teste existem; falta caso de uso/endpoint |
+| Reconciliação pública | IMPLEMENTADO E TESTADO | Caso de uso/endpoint validados com saldo consistente; diagnóstico de divergência será ampliado na fase6 |
 | Observabilidade / readiness | PENDENTE | Liveness/log de startup existentes; falta integração |
 | ≥3 processos financeiros | IMPLEMENTADO E TESTADO | BET/WIN/REFUND; falta cenário completo de transporte/crash |
 | Docker PostgreSQL/SQS | IMPLEMENTADO E TESTADO | Containers healthy; broker local perde mensagens ao recriar |
 | Instalação limpa e entrega final | PENDENTE | Scripts, documentação, testes e revisão final |
-| Autenticação | PENDENTE | Omissão permitida; documentar e criar extensão explícita |
+| Autenticação | IMPLEMENTADO E TESTADO | Omissão documentada, guard no-op explícito e perfil local |
 
 Estado IMPLEMENTADO, MAS SEM TESTE INTEGRADO será usado somente quando houver código
 novo ainda sem evidência ponta a ponta. Não equivale a requisito concluído.

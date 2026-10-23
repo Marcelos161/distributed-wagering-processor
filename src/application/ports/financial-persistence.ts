@@ -15,6 +15,7 @@ export interface WalletRepository {
 }
 
 export interface WagerTransactionRepository {
+  listByWalletId(walletId: string): Promise<readonly WagerTransaction[]>;
   findProcessedReversal(referenceId: string): Promise<WagerTransaction | null>;
   /** Query after locking the wallet; the unique index remains authoritative. */
   findProcessedRefund(referenceId: string): Promise<WagerTransaction | null>;
@@ -31,6 +32,7 @@ export interface PersistedLedgerEntry {
 }
 
 export interface LedgerEntryRepository {
+  pageByWalletId(walletId: string, afterVersion: number, limit: number): Promise<readonly PersistedLedgerEntry[]>;
   insert(entry: WalletLedgerEntry, walletVersion: number): Promise<void>;
   listByWalletId(walletId: string): Promise<readonly PersistedLedgerEntry[]>;
 }

@@ -23,9 +23,9 @@ describe('HTTP application under Bun', () => {
     expect(await response.json()).toEqual({ status: 'ok' });
   });
 
-  test('does not claim readiness before dependencies are implemented', async () => {
+  test('checks PostgreSQL and SQS readiness through HTTP', async () => {
     const response = await fetch(`${baseUrl}/health/ready`);
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(200);
     await response.text();
   });
 });

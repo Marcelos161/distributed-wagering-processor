@@ -1133,3 +1133,32 @@ porque up os reconstrói exatamente a partir da transação pendente, preservand
 Worker encerra admissão ao receber SIGTERM, aguarda trabalho corrente e fecha ORM.
 Consulta SQL do processo tem timeout30s; SIGKILL é validado em teste real, não apenas
 por exceção. Credencial administrativa é recusada no startup como na API.
+
+## ADR-029 — API, consultas e reconciliação
+
+Rotas exatas da seção9 do README, DTOs validados explicitamente e guard no-op
+ProviderIdentityGuard para futura integração OIDC. Autenticação omitida conforme
+seção2: ambiente local loopback; não há autorização de proprietário/provedor em produção.
+Antes de exposição substituir guard por validação de issuer/audience/token e vínculo
+do principal com provider/player, inclusive nas consultas. Health continua público.
+
+HTTP:201 abertura;200 sucesso/replay;202 pendente;422 rejeição financeira/vínculo
+incompatível;400 contrato inválido;404 ausente;409 duplicidade de wallet/identidades;
+503 dependência transitória;500 erro interno ou FAILED auditável. Corpo de erro só
+code/correlationId, nunca exception/SQL/stack. Rejeições financeiras mantêm DTO
+histórico e failureCode. Idempotency-Key só vem do header; body contendo chave é
+recusado. Valores/IDs limitados antes do banco; IDs text até200bytes evitam entradas
+excessivas nos índices. Não há cache como garantia de replay.
+
+Ledger usa cursor base64url v1 contendo walletId/última versão. É opaco, validado e
+vinculado à carteira, não é segredo nem token de autorização. ORDER BY numérico na
+coluna wallet_version, páginas1..100, SELECT limitado; inserções posteriores não
+reordenam histórico. Consultas de transação não expõem hash ou chave de idempotência.
+
+Reconciliação adquire lock Wallet e lê ledger/transações na mesma UOW, impedindo
+escritores cooperativos de mudar o estado durante a leitura. Recalcula com Money,
+confere encadeamento, versão, unicidade, direção/valor/status e correspondência; devolve
+diferença assinada e lista de issues, sem corrigir nada. Primeira versão2 é válida
+para wallet aberta com zero; versão1 existe quando OPENING positiva. Custo linear no
+histórico, apropriado ao desafio; execução longa em carteira quente bloqueia escritas.
+Readiness verifica PostgreSQL/SQS; liveness não consulta dependências.

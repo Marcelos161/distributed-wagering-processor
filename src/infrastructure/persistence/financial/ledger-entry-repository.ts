@@ -15,6 +15,13 @@ export class MikroLedgerEntryRepository implements LedgerEntryRepository {
       r.balance_before, r.balance_after, r.created_at]);
   }
 
+  async pageByWalletId(walletId: string, afterVersion: number, limit: number): Promise<readonly PersistedLedgerEntry[]> {
+    const rows = await this.session.execute<LedgerEntryRecord[]>(
+      `SELECT *,wallet_version::text,balance_before::text,balance_after::text FROM wallet_ledger_entries
+       WHERE wallet_id=? AND wallet_version>? ORDER BY wallet_ledger_entries.wallet_version ASC LIMIT ?`, [walletId, afterVersion, limit]);
+    return rows.map(row => LedgerEntryMapper.toDomain(row));
+  }
+
   async listByWalletId(walletId: string): Promise<readonly PersistedLedgerEntry[]> {
     const rows = await this.session.execute<LedgerEntryRecord[]>(
       `SELECT id, wallet_id, transaction_id, wallet_version::text, direction, amount, currency,

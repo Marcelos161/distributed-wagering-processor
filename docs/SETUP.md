@@ -406,3 +406,14 @@ terminal `bun run worker:references`. Os parâmetros REFERENCE_* de `.env.exampl
 controlam300tentativas/TTL24h/backoff1s→5min. `bun run test:references` cria seus próprios
 bancos descartáveis; não requer migrar wagering. O worker suporta SIGTERM e retomada
 após SIGKILL. Ele não publica eventos: apenas persiste Outbox com o resultado financeiro.
+
+### API financeira
+
+`bun run start` inicia a API local após preparar o banco escolhido. Autenticação foi
+omitida explicitamente; não exponha esse perfil fora de loopback. Rotas: POST /wallets,
+GET /wallets/:walletId, GET /wallets/:walletId/ledger?limit=50&cursor=..., POST
+/wagering/transactions (header Idempotency-Key obrigatório), GET
+/wagering/transactions/:transactionId, GET
+/providers/:providerId/wagering/transactions/:externalTransactionId e POST
+/wallets/:walletId/reconciliation. GET /health/live e /health/ready são públicos.
+`bun run test:api` valida HTTP real em banco descartável e porta efêmera.

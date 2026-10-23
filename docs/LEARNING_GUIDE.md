@@ -5307,3 +5307,41 @@ reconciliam saldo com ledger. Nenhum teste modifica o banco principal.
 Evidência fase2: check494/typecheck/build, referências9, ROLLBACK14 e regressão de
 persistência REFUND4 passaram. O handler catch do entrypoint imprime somente
 role/status startup_failed, sem exception/connection string, define exitCode1.
+
+## 40. HTTP real, consultas e reconciliação
+
+A rota traduz transporte; o caso de uso existente decide dinheiro. Criar carteira
+com100 e apostar25 produz HTTP200/75.00; reapresentar a key após outro crédito ainda
+retorna75.00. O header é fonte de verdade. O correlationId recebido (token até100)
+ou gerado volta na resposta; não entra no hash financeiro.
+
+| Arquivo / funções | Responsabilidade, parâmetros, retorno, sequência e erros |
+|---|---|
+| `transport-validation.ts::objectFields` | unknown, lista permitida/obrigatória → Record. Recusa arrays, campos extras/ausentes; InvalidWagerInputError. Compartilhado com SQS. |
+| `token/money/walletInput/wagerInput` | token valida string<=200bytes; money valida campos/limite de tamanho e Money; walletInput retorna CreateWalletInput no teto; wagerInput recebe unknown/key/transporte, valida allowlist e retorna WagerInput normalizado por prepareWager. Erros de contrato/Money antes da UOW. |
+| `FinancialController.constructor/open/submit` | Injeta CreateWallet/ProcessWagerTransaction/FinancialQueries. open valida e devolve Promise<CreatedWallet>; submit usa header, aguarda execute e escolhe status pelo resultado. Nenhuma SQL/regra financeira na rota. |
+| `wallet/ledger/transaction/external/reconcile` | Recebem params/query, validam IDs/limite e delegam consultas, retornando promises DTO. reconcile usa200. Erros seguem filter central. Chamados pelo roteador Nest nas rotas oficiais. |
+| `FinancialQueries.constructor/wallet/transaction` | UOW injetada; ID e provider opcional → DTO de leitura. Repositório retorna null → ResourceNotFoundError. transactionView serializa campos públicos, datas ISO e MoneyProps, sem hash/key. |
+| `ledger(walletId,cursor?,limit=50)` | Valida página/cursor1-wallet-version, chama pageByWalletId(limit+1), serializa itens e gera nextCursor ou null. InvalidCursorError em cursor inválido/carteira diferente/limite. Keyset estável sem OFFSET. |
+| `MikroLedgerEntryRepository.pageByWalletId` | string,number,number → Promise<readonly PersistedLedgerEntry[]>; SQL parametrizado ordenado numericamente, mapper existente; SQL/mapper propagam. |
+| `MikroWagerTransactionRepository.listByWalletId` | string → Promise<readonly WagerTransaction[]>; SELECT por carteira, rehydrate cada linha. Usado na reconciliação; não anexado para escrita. |
+| `reconcile(walletId)` | Lock Wallet → ledger/transações → soma créditos menos débitos com Money → verifica cadeia/versão/direção/status/duplicidade/movimento faltante → DTO oficial + issues. ResourceNotFoundError se ausente; SQL propaga. Calcula difference=stored-calculated, pode ser negativa sem violar entrada Money. Não faz UPDATE. |
+| `publicError(error)` | unknown → status/code públicos. Mapeia classes de domínio/admissão, códigos SQL de conexão/timeout como503; UNIQUE genérico não vira409. Falhas desconhecidas500. |
+| `ApiExceptionFilter.catch` | unknown,ArgumentsHost → void; obtém resposta/request e envia erro sanitizado com correlationId. Não expõe mensagem original nem stack. |
+| `ProviderIdentityGuard.canActivate` | boolean true, extensão explícita local para OIDC; não alegamos autenticação. Health fora do guard. |
+| `createApplication` | Agora async; monta Nest, registra filter/middleware e devolve app. Callback middleware sanitiza correlationId ou gera UUID, adiciona header e chama next. Startup não aplica migrations. |
+| `sqsClient/queueUrl/checkQueue` | Configuração env → SQSClient com timeout/retry; queueUrl(client,name) resolve URL ou Error; checkQueue consulta atributos para comprovar acesso. Promises propagam falhas do SDK; credenciais não são logadas. |
+| `HealthController.ready/live` | Injeta ORM. ready consulta SELECT1 e SQS em paralelo e fecha client no finally;200 ready ou503. live retorna ok sem dependências. |
+
+Erros ResourceNotFoundError/InvalidCursorError só fornecem code estável, usados pelo
+filter. AppModule injeta FinancialQueries via UOW e registra controllers/guard; SDK
+SQS passa a dependency de runtime. Dinheiro nunca usa Number; limit/versão são contadores.
+
+`infra/test/api.test.ts::withApi(run)` abre banco descartável/app em porta efêmera,
+restaura env e fecha app no finally. request(url,path,body?,key?) envia HTTP real,
+retorna status/header/JSON. payload(walletId,patch) remove key do body de fixture.
+Três testes: todas as consultas/abertura/aposta/replay/paginação até versão12 e
+reconciliação; matriz de erros/contrato/key/cursor; readiness indisponível sem afetar
+live. Callbacks async propagam falhas e usam PostgreSQL/SQS reais. Teste anterior
+health.http foi atualizado porque readiness agora existe. check494/typecheck/build e
+API3 (54assertions) passaram; enunciado e banco principal preservados.
