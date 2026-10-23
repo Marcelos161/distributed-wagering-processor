@@ -1,5 +1,8 @@
 # Arquitetura e registro de decisões
 
+Estado final: consulte [consolidação da entrega](#estado-consolidado-da-entrega-23102026).
+As ADRs mantêm o contexto histórico de cada incremento.
+
 ## ADR-006 — MikroORM e identidade de aplicação (adotada)
 
 MikroORM/core/postgresql 7.2.5, integração oficial Nest 7.1.0, ESM/NodeNext e Bun
@@ -1226,3 +1229,74 @@ A contagem de conexões por worker não substitui health do processo.
 Reconciliação foi exercitada com dano deliberado por administrador exclusivamente em
 banco descartável: saldo divergente, ledger removido/lacuna. Resposta denuncia issues
 e diferença sem consertar saldo. Permissão normal app continua incapaz dessas mutações.
+
+## Estado consolidado da entrega (23/10/2026)
+
+As ADRs anteriores são registros incrementais: expressões como “futuro”, “sem HTTP”
+ou “pendente” nelas descrevem a data da decisão, não o estado final. Esta seção e
+DELIVERY_CHECKLIST.md consolidam a implementação atual.
+
+```mermaid
+flowchart TD
+  HTTP[HTTP NestJS] --> UC[CreateWallet / ProcessWagerTransaction / FinancialQueries]
+  SQS[SQS comandos FIFO] --> Consumer[Consumer + Inbox]
+  Consumer --> UC
+  Reference[Worker de referências] --> UC
+  UC --> Domain[Money / Wallet / WagerTransaction / Ledger / Events]
+  UC --> UOW[MikroORM EntityManager transacional + SQL parametrizado]
+  UOW --> PG[(PostgreSQL constraints / locks / snapshots / Inbox / Outbox)]
+  PG --> Publisher[Publisher: claim curto + lease]
+  Publisher --> Events[SQS eventos FIFO]
+```
+
+O modelo persistido inclui wallets, wager_transactions, wallet_ledger_entries,
+inbox_messages, outbox_messages, resultados terminais, comprovantes pendentes,
+pending_reference_jobs e outbox_claims. Nomes exatos e relacionamentos constam nas
+migrations; todas as FKs financeiras pertencem à mesma base transacional. Ledger é
+append-only; resultados são snapshots imutáveis. Nenhuma entidade de domínio recebe
+decoradores Nest/ORM. Mappers usam factories rehydrate; repositórios gravam SQL
+parametrizado através do EM da UOW para não agrupar duas versões em um único UPDATE.
+
+```mermaid
+stateDiagram-v2
+  [*] --> PENDING
+  PENDING --> PENDING_REFERENCE: dependência ausente
+  PENDING --> PROCESSED: aplicação aceita
+  PENDING --> REJECTED: regra de negócio
+  PENDING --> FAILED: falha terminal explícita
+  PENDING_REFERENCE --> PROCESSED: referência válida
+  PENDING_REFERENCE --> REJECTED: referência inválida / expiração / saldo
+  PENDING_REFERENCE --> FAILED: falha terminal explícita
+```
+
+Falha técnica que aborta SQL não altera estado. Retries reconstroem UOW: até3tentativas
+para40P01/40001 na admissão síncrona. Demais falhas são propagadas, nunca tratadas
+como rejeição financeira genérica. Consumer retém mensagem para retry/DLQ; resolver
+retém o job; publisher retém o evento e agenda backoff.
+
+Concorrência: locks transacionais de identidades em ordem determinística precedem
+FOR UPDATE da carteira. UNIQUEs são a última barreira, mesmo contra SQL direto.
+Carteiras distintas não usam lock global. Triggers diferíveis conferem movimento,
+versão e lançamento no commit. Reconciliação usa o mesmo lock para leitura consistente.
+
+Idempotência: SHA256 do JSON canônico de negócio, chave e identidade externa por
+provedor, snapshot de resposta por transação. Inbox acrescenta (consumer,messageId)
+com comparação de hash. Outbox contém intenção durável no commit financeiro; publisher
+só vê eventos confirmados. Claim de lease é confirmado antes de chamada de rede;
+finish exige token atual e lease válida. Crash entre SendMessage e publishedAt pode
+repetir evento com mesmo eventId. Não há promessa de exactly-once no transporte.
+
+## ADR-033 — Execução local e prova de entrega
+
+Escolha: processos Bun explícitos em quatro terminais, Compose somente PostgreSQL e
+LocalStack, setup isolado em wagering_demo. Alternativa de Dockerizar também API e
+workers é possível, mas acrescentaria imagens/builds sem melhorar a garantia avaliada;
+as provas multiprocesso iniciam os entrypoints reais. Setup nunca usa down/reset nem
+migra silenciosamente o banco principal. Credenciais de migration ficam em arquivo
+local separado. Instalação limpa usa cópia de Git e bun install --frozen-lockfile,
+sem reaproveitar node_modules, seguida de strict/test/build e inicialização real.
+
+Os limites operacionais estão no EVALUATOR_GUIDE: autenticação omitida permitida,
+broker local descartável, entrega at-least-once, catálogo de moedas fechado, teto
+NUMERIC com CHECK, reconciliação O(N), contadores locais, política conservadora de
+compensação. Testes de integridade não representam teste de carga de produção.

@@ -328,3 +328,11 @@ os cenários após commit/antes de ACK e após envio/antes de publishedAt estão
 de consumer e publisher. Dez migrations reexecutam e revertem em banco vazio; dados
 incompatíveis bloqueiam downgrade. Fase8/9: instalação limpa, documentação e regressão
 integral em fechamento; nenhuma autorização adicional é necessária para concluí-las.
+
+Missão final concluída tecnicamente:792testes distintos, lint/typecheck/build aprovados.
+Instalação limpa sem node_modules compartilhado repetiu494testes, lint e build;
+API compilada + três workers reais responderam health/metrics e encerraram com SIGTERM.
+Setup idempotente prepara wagering_demo com dez migrations; principal preservado.
+README oficial intacto, matriz final e guia de execução/documentação de envio prontos.
+Não há próxima funcionalidade autorizada a iniciar. Publicação e formulário dependem
+apenas de destino/dados/autorização externos ainda não fornecidos; nenhum push foi feito.

@@ -5502,3 +5502,11 @@ um orquestrador de processos novo. Detalhes de execução em EVALUATOR_GUIDE.md.
 Evidência do setup: duas execuções consecutivas terminaram com `Demo ready`; a
 primeira aplicou00001–00010, a segunda não reaplicou nenhuma. Lint e typecheck passaram.
 A regressão anterior ao setup aprovou792testes, inclusive restart/recriação da infra.
+
+Fechamento: cópia limpa do Git, `bun install --frozen-lockfile` sem node_modules
+compartilhado, lint e check aprovados (494 testes repetidos, não somados aos792).
+API compilada e três workers iniciados em quatro PIDs: ready/live/metrics200,
+POST /wallets201 com abertura zero, reconciliação200/consistenttrue/checkedEntries0.
+SIGTERM: API reemitiu sinal após shutdown; três workers saíram0. Auditoria SQL final:
+principal0tabelas públicas, demo10migrations, zero dwp_test_* e zero conexões worker.
+README oficial preservou SHA256 a111cf1b1ad30412ce8e2a23631affe180a558773a5a03d34f85706e4d747c71.

@@ -747,70 +747,59 @@ Teste de carga também conta como diferencial. Se fizer, exponha como `bun run t
 
 ---
 
-## Implementação do candidato — estado atual
+## Implementação do candidato — entrega técnica
 
-O enunciado acima foi preservado. Há base NestJS/Bun, TypeScript estrito,
-`GET /health/live`, PostgreSQL persistente e SQS FIFO/DLQ em LocalStack Community
-4.14.0, sem token. MikroORM está integrado ao NestJS com papel restrito; CLI oficial
-de migrations configurada e validada em bancos descartáveis. Money é imutável,
-usa decimal.js e aceita contratos com escala 2 em BRL/USD/EUR; tem testes unitários
-independentes de infraestrutura. WalletLedgerEntry modela lançamentos imutáveis,
-com criação validada e reidratação. Wallet controla saldo/versão localmente e retorna
-o lançamento em abertura positiva, débito e crédito. WagerTransaction modela kinds,
-lifecycle, referências e códigos de falha localmente. O schema financeiro está
-versionado em três migrations, com constraints, ledger imutável e verificações
-diferíveis testadas por SQL em bancos descartáveis. Não foi aplicado no banco
-principal. Mappers, repositórios e unidade transacional com lock por wallet estão
-implementados. Eventos v1, Inbox/Outbox e sua integração na mesma transação foram
-adicionados em uma quarta migration, também validada só em bancos descartáveis.
-CreateWallet coordena abertura positiva com OPENING/ledger/dois eventos Outbox na mesma
-transação; abertura zero cria só a carteira. Está disponível por injeção, ainda sem
-controller. ProcessWagerTransaction processa BET, WIN, LOSS e REFUND com idempotência por provedor,
-locks por identidade/carteira e replay histórico. A quinta migration guarda resultados
-terminais; a sexta amplia WIN/LOSS e guarda comprovantes imutáveis de WIN pendente.
-A sétima inclui resultados e comprovantes REFUND. O reembolso integral de BET tem
-proteção por lock da carteira e UNIQUE por referência/tipo; tentativas duplicadas são
-rejeitadas e replays preservam a resposta original. Referências são resolvidas por
-provedor; reprocessamento agendado e ROLLBACK permanecem pendentes.
-Publishers, consumers e endpoints financeiros permanecem pendentes. Para estudar
-só Money: `bun test ./test/money.test.ts`; lançamentos:
-`bun test ./test/wallet-ledger-entry.test.ts`; Wallet: `bun test ./test/wallet.test.ts`;
-WagerTransaction: `bun test ./test/wager-transaction.test.ts`.
+Implementado: domínio financeiro independente de frameworks; OPENING, BET, WIN,
+LOSS, REFUND e ROLLBACK; API NestJS; PostgreSQL/MikroORM com dez migrations;
+idempotência e replay persistentes; ledger imutável; Inbox/Outbox; consumer SQS;
+publisher com leases; resolução de referências; reconciliação, logs e métricas.
 
-Com Bun 1.4.3 disponível, execute na raiz:
+A correção financeira depende de transações, locks e constraints PostgreSQL.
+SQS FIFO organiza o transporte; Inbox e idempotência persistentes impedem repetir o
+mesmo efeito. Eventos são publicados depois do commit, com entrega at-least-once.
+Autenticação foi omitida conforme permitido na seção 2; perfil de execução local.
+
+### Começar
+
+Bun 1.4.3, Docker com Compose v2 e portas 3000/55432/4566 livres:
 
 ```bash
 bun install --frozen-lockfile
-export DATABASE_URL=postgresql://wager_app:local_app_only@127.0.0.1:55432/wagering
-bun run infra:up
-bun run check
-bun run start
+cp -n .env.example .env
+bun run demo:setup
+bun --env-file=.env.demo run start
 ```
 
-Infraestrutura local (Docker com Compose):
+O setup cria/migra **wagering_demo**, preservando o banco principal e seu volume.
+Em outros três terminais:
 
 ```bash
-bun run infra:up
-bun run infra:status
-bun run test:infra
-bun run test:orm
-bun run test:migrations
-bun run test:financial
-bun run test:persistence
-bun run test:messaging
-bun run test:wallet-creation
-bun run test:bet
-bun run test:wager
-bun run test:refund
+WORKER_HEALTH_PORT=3101 bun --env-file=.env.demo run worker:consumer
+WORKER_HEALTH_PORT=3102 bun --env-file=.env.demo run worker:publisher
+WORKER_HEALTH_PORT=3103 bun --env-file=.env.demo run worker:references
 ```
 
-Os testes de infraestrutura reiniciam/recriam os serviços deste projeto: execute
-com as filas vazias e sem aplicação/worker usando o ambiente. O volume PostgreSQL
-é preservado. LocalStack é descartável: filas são reprovisionadas, mensagens
-pendentes não sobrevivem ao restart do emulador. `bun run infra:down` preserva o
-volume PostgreSQL. Consulte os detalhes e comandos no setup abaixo.
+[Guia do avaliador](docs/EVALUATOR_GUIDE.md): configuração, migrations, todos os
+endpoints, exemplos curl, SQS/DLQ, health, encerramento e limites conhecidos.
+[Setup detalhado](docs/SETUP.md) mantém as explicações da infraestrutura.
 
-- [Instalação, configuração e comandos](docs/SETUP.md)
-- [Auditoria, requisitos pendentes e plano de commits](docs/IMPLEMENTATION_PLAN.md)
-- [Guia de aprendizado e explicação de cada função](docs/LEARNING_GUIDE.md)
-- [Decisões, alternativas e limitações arquiteturais](ARCHITECTURE.md)
+### Validar
+
+```bash
+bun run test:all
+# Cenário focado com três processos independentes:
+bun run test:distributed
+```
+
+A suíte completa requer os processos parados e filas padrão vazias: seu último passo
+reinicia/recria os containers do projeto. Não remove volume PostgreSQL. Testes
+financeiros usam bancos descartáveis; testes SQS usam filas isoladas, exceto a suíte
+de infraestrutura que verifica as filas padrão. Faça a validação antes de gerar
+mensagens de demonstração. LocalStack tem PERSISTENCE=0: restart do broker perde
+mensagens; recuperação de crash dos workers é validada separadamente.
+
+- [Matriz de requisitos e evidências finais](docs/DELIVERY_CHECKLIST.md)
+- [Arquitetura, alternativas e garantias](ARCHITECTURE.md)
+- [Guia didático por função e cenário](docs/LEARNING_GUIDE.md)
+- [Histórico do plano incremental](docs/IMPLEMENTATION_PLAN.md)
+- [Preparação de envio e entrevista](docs/SUBMISSION.md)
