@@ -13,20 +13,20 @@
 - Bun não estava disponível no PATH; instalado localmente em `.tools/` (ignorado).
   Docker Compose está disponível; nenhum container foi iniciado nesta etapa.
 
-## Comparação com o README — atualização após WIN/LOSS
+## Comparação com o README — atualização após REFUND
 
 | Requisito/seção | Antes | Estado atual | Evidência futura necessária |
 |---|---|---|---|
 | Bun, TS strict, Nest (§4) | Ausente | Implementado | Manter check passando |
 | PostgreSQL, SQS, Compose, ORM e migrations (§4) | Ausente | Containers, MikroORM/Nest, migrations e mappers/repositórios validados | Operação nos ambientes alvo; principal ainda sem migrations financeiras |
 | Money, Wallet, WagerTransaction, ledger (§6) | Ausente | Domínio e persistência implementados; CreateWallet com OPENING/ledger/Outbox atômicos | Demais casos de uso financeiros |
-| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Domínio completo; BET/WIN/LOSS com Outbox, rejeição, pendências WIN e snapshots históricos | Casos de uso REFUND/ROLLBACK, reprocessador e entrada Inbox |
-| Concorrência por wallet (§8) | Ausente | BET 80+80/saldo 100, 50 BETs e 50 WINs em 3 processos reais, LOSS e operações mistas validadas | Outros kinds e janelas de falha distribuída |
+| BET/WIN/LOSS/REFUND/ROLLBACK (§7) | Ausente | Domínio completo; BET/WIN/LOSS/REFUND com Outbox, rejeição, pendências e snapshots históricos | ROLLBACK, reprocessador e entrada Inbox |
+| Concorrência por wallet (§8) | Ausente | BET 80+80/saldo 100, 50 BETs, 50 WINs e 50 REFUNDs em 3 processos reais, LOSS e operações mistas validadas | Outros kinds e janelas de falha distribuída |
 | API e replay original (§9) | Ausente | Apenas liveness | Todos os contratos, status e paginação |
 | Inbox/SQS/ACK/DLQ/shutdown (§10) | Ausente | Modelo/schema/repositório Inbox e SQS local testados; sem consumer | Consumer, crash após commit antes de ACK, shutdown |
 | Outbox e eventos (§11) | Ausente | Eventos v1 e Outbox persistente; abertura grava dois eventos na mesma transação | Dois publishers, crash e redelivery |
 | Observabilidade (§12) | Ausente | Logs de startup JSON e liveness | Contexto completo, métricas e readiness |
-| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais; BET/WIN/LOSS com replay, rollback e 3 processos Bun | Fluxos HTTP/SQS, kill-process e publishers |
+| Integração/distribuição (§13) | Ausente | PostgreSQL/SQS reais; BET/WIN/LOSS/REFUND com replay, rollback e 3 processos Bun | Fluxos HTTP/SQS, kill-process e publishers |
 | Documentação (§14) | Enunciado | Plano, arquitetura e guia | Atualização a cada funcionalidade |
 | Autenticação (§2) | Ausente | Decisão proposta, sem endpoints financeiros | Porta de identidade explícita e desenho OIDC |
 
@@ -48,11 +48,11 @@ que cresça deve ser dividida; a mensagem é proposta, não registro de commit r
 | 9 | `feat: define versioned integration events` | Concluída: classe abstrata, subclasses e envelopes com MoneyProps; serialização estável |
 | 10 | `feat: persist transactional outbox records` | Concluída: modelos/repositórios Inbox/Outbox na mesma transação; publicação pendente |
 | 11 | `feat: open and query wallets atomically` | Abertura concluída: OPENING/ledger/Outbox positivos, versão1; consultas públicas, controller e porta de identidade pendentes |
-| 12 | `feat: persist wager idempotency and original results` | Implementado para BET/WIN/LOSS: unicidade por provedor, JSON canônico, snapshot imutável; replay após recriar ORM. Adaptador/replay HTTP pendente |
+| 12 | `feat: persist wager idempotency and original results` | Implementado para BET/WIN/LOSS/REFUND: unicidade por provedor, JSON canônico, snapshot imutável; replay após recriar ORM. Adaptador/replay HTTP pendente |
 | 13 | `feat: process BET with wallet-level locking` | Implementado: débito + ledger + status + Outbox + resultado atômicos; validações concorrentes na seção29 do guia |
 | 14 | `feat: process WIN and LOSS transactions` | Concluído: crédito WIN/registro LOSS, referências pendentes ou rejeitadas, eventos e versões corretos; 62 testes PostgreSQL novos |
-| 15 | `feat: process full REFUND reversals` | Mesma referência completa, uma vez por tipo, valores iguais e pendência persistida |
-| 16 | `feat: process ROLLBACK reversals` | Inversão de BET/WIN/REFUND e código específico para reversão sem saldo |
+| 15 | `feat: process full REFUND reversals` | Concluída: referência integral, unicidade por tipo, pendência/rejeição e snapshots; 57 testes PostgreSQL novos |
+| 16 | `feat: process ROLLBACK reversals` | Após autorização e decisão sobre interação REFUND/ROLLBACK: inversão de BET/WIN/REFUND e código para reversão sem saldo |
 | 17 | `feat: expose wagering HTTP contracts` | DTOs, OPENING bloqueado, header obrigatório, erros consistentes, consultas e cursor opaco |
 | 18 | `feat: implement transactional SQS inbox consumer` | Mesmo use case do HTTP, inbox na transação, ACK pós-commit, retry/DLQ e shutdown |
 | 19 | `feat: publish outbox events with concurrent workers` | Reivindicação recuperável, backoff, eventId estável, dois publishers e crash após envio |
@@ -296,3 +296,16 @@ replay e snapshots. Os 29 testes funcionais e 15 de rollback usam PostgreSQL rea
 Nenhum worker iniciado; um teste compõe manualmente a conclusão futura para provar
 que receipt e resultado terminal coexistem. Fechamento de concorrência e regressões
 permanece no último incremento desta autorização.
+
+Etapa REFUND concluída: **751 testes distintos aprovados**, typecheck/build OK.
+São 73 testes novos: 16 unitários e 57 PostgreSQL. Dois reembolsos diferentes da mesma
+BET serializam: um sucesso e uma rejeição, ou um sucesso se o primeiro abortar. Um
+writer SQL direto foi barrado pelo UNIQUE após esperar o commit. Cinquenta chamadas
+em três processos Bun geraram um crédito e 49 replays. Carteiras independentes,
+referência concorrente, falhas e histórico foram reconciliados com ledger.
+
+PostgreSQL/LocalStack saudáveis após testes reais de restart/recriação; principal com
+zero tabelas públicas e nenhum banco descartável remanescente. Enunciado preservado;
+nenhum push. Próxima etapa sugerida: ROLLBACK, só após autorização e definição das
+sequências permitidas com REFUND; a unicidade por tipo não oferece exclusão cruzada.
+HTTP, consumer, publisher, worker de referências e autenticação continuam pendentes.

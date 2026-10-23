@@ -390,3 +390,11 @@ o teste de reversão sem dados novos conserva os resultados BET/WIN anteriores.
 Continue rodando `test:bet` e `test:wager` como regressão, além das suítes anteriores.
 Somente após encerrá-las, execute `test:infra`, que reinicia os containers. O caso de
 uso continua disponível pela composição Nest existente; não há endpoint REFUND.
+
+`test:refund` inclui 50 chamadas em três processos Bun, reutilizando `bet-worker.ts`
+como fixture. Usa observação de bloqueadores no servidor, além de barreiras e timeouts;
+não exige configurar SQS para o processamento REFUND. Os outros cenários exercitam
+commit/rollback concorrente, referência chegando depois e um INSERT SQL direto contra
+o índice de reversão. A soma final das suítes documentadas nesta etapa é 751 testes
+distintos aprovados, incluindo os 6 de infraestrutura. Evidências e explicação de
+cada callback estão nas seções 34–37 de `LEARNING_GUIDE.md`.

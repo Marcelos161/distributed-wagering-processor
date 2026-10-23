@@ -5064,4 +5064,154 @@ Os erros SQL inesperados são propagados. Não tratamos toda violação UNIQUE c
 DUPLICATE_REVERSAL; só a decisão explícita de domínio vira essa rejeição. O retry
 transitório começa do zero, relê referência e saldo e não reutiliza objetos mutados.
 Validação deste incremento: 44 testes funcionais/rollback, mais 4 de persistência,
-494 unitários, typecheck/build e regressões de 40 BET / 62 WIN-LOSS aprovados sem falhas.
+494 testes de ./test, typecheck/build e regressões de 40 BET / 62 WIN-LOSS aprovados sem falhas.
+
+## 37. Concorrência de REFUND e evidência final da etapa
+
+A carteira é a fronteira de serialização do saldo. Duas identidades REFUND diferentes
+podem passar pelos locks de admissão simultaneamente, mas apenas uma segura o lock
+`FOR NO KEY UPDATE` daquela Wallet. A segunda aguarda e, depois, lê novamente o banco:
+se a primeira confirmou, encontra o REFUND anterior e grava rejeição; se reverteu,
+pode processar. Uma carteira diferente continua avançando. Não há mutex global em
+memória nem dependência de FIFO para essa garantia.
+
+O índice parcial existente `wager_successful_reversal_unique` aplica unicidade de
+`(reference_transaction_id, kind)` somente a linhas PROCESSED REFUND/ROLLBACK.
+Tentativas rejeitadas/pendentes podem coexistir. A checagem UNIQUE do PostgreSQL
+aguarda uma inserção concorrente ainda não confirmada antes de decidir conflito;
+a suíte observa esse bloqueio e depois o erro 23505 pelo nome exato da constraint.
+Ver [documentação de unicidade](https://www.postgresql.org/docs/17/index-unique-checks.html)
+e [índices parciais](https://www.postgresql.org/docs/17/indexes-partial.html).
+
+Ler a referência depois da Wallet evita decidir com saldo anterior à BET concorrente
+que está sendo concluída pelo mesmo protocolo. Não adicionamos lock de identidade da
+referência depois do lock da Wallet, pois isso poderia criar uma ordem circular.
+SELECT usa a visibilidade confirmada do READ COMMITTED; se uma BET só foi inserida
+PENDING em outra sessão e ainda não está visível, o REFUND fica pendente e não força
+espera por aquela identidade. A disponibilidade de saldo não é deduzida de eventos.
+
+### Nove testes de concorrência e seus callbacks
+
+Arquivo `infra/test/refund-concurrency.test.ts`. Bun chama cada teste async com os
+parâmetros listados; retorno Promise<void>, erros de SQL/assertion/timeout propagados.
+Usa withRefundDatabase, processor/creator, UOWs reais, Money no domínio e SELECTs em
+outra conexão para observar resultados. Todos terminam com assertReconciled. As
+barreiras gate/bounded/observeWait de `bet-support.ts` são reutilizadas sem alteração.
+
+| Teste (prefixo) | Parâmetros, sequência e resultado observado |
+|---|---|
+| `two distinct REFUNDs...first %s` (2) | outcome:commit\|rollback. Primeiro REFUND pausa antes do commit; segundo usa outra instância ORM, outra identidade e aguarda lock observado pelo servidor. WIN de outra Wallet termina ainda com a primeira bloqueada. Após commit, segundo é DUPLICATE_REVERSAL; após rollback, segundo é PROCESSED. Em ambos: um crédito REFUND, saldo 100.00/versão 3. |
+| `REFUND and concurrent %s` (2) | kind:WIN\|BET. Pausa REFUND, outra sessão tenta movimento e observamos sua espera na Wallet. Após liberação, WIN leva a 140.50 ou BET a 75.00, sempre versão 4 e ledger reconciliado. |
+| `REFUND racing BET arrival...%s` (2) | outcome:commit\|rollback. BET segura a carteira antes do commit; REFUND aguarda. BET confirmada permite REFUND processado com saldo 100.00/versão 3; BET revertida deixa REFUND pendente com 100.00/versão 1. |
+| `REFUND does not acquire a circular reference lock` (1) | Sem parâmetros. Outra conexão insere BET PENDING e mantém transação aberta. REFUND conclui como pendente antes de liberá-la. Após commit da BET PENDING, replay preserva receipt, só existe ledger de abertura. Demonstra ausência de espera circular nessa janela. |
+| `unique reversal index blocks concurrent direct SQL bypass` (1) | Sem parâmetros. Primeiro REFUND pronto pausa antes do commit. Outra sessão tenta INSERT PROCESSED diretamente, com mesma referência e identidade nova, omitindo validação local. pg_stat_activity/pg_blocking_pids comprovam bloqueio do INSERT; primeiro confirma; segundo recebe 23505/wager_successful_reversal_unique. Uma linha REFUND e saldo 100.00/versão 3. |
+| `50 identical REFUNDs in three Bun processes` (1) | Sem parâmetros. Processo pai segura Wallet, inicia três Bun filhos com 17/17/16 chamadas e observa três application_names bloqueados no PostgreSQL. Libera; três PIDs distintos retornam 50 respostas: 1 processamento e 49 replays. Um transactionId, saldo 100.00/versão 3, um ledger, um snapshot e dois eventos Outbox. |
+
+Detalhamento das funções internas criadas nesses testes:
+
+- `paused.run(work)` implementa a assinatura genérica FinancialUnitOfWork.run no
+  wrapper local de cada cenário. Recebe o callback e o executa nos repos da UOW real;
+  abre held, aguarda release e retorna o resultado, ou lança Error quando outcome é
+  rollback. Quem o utiliza é ProcessWagerTransaction.execute. A transação real só
+  confirma depois do retorno; finally dos testes libera barreiras e fecha ORM.
+- O callback `app.begin(async connection => ...)` do PENDING recebe SQL transacional,
+  chama insertTransaction e aguarda release; retorna Promise<void>. O callback do
+  bypass recebe a mesma interface e retorna a promise de INSERT. Não concede novas
+  permissões nem desabilita triggers; erros SQL chegam ao handler para assertions.
+- Handlers `.catch((error:unknown) => error)` capturam resultados de promises iniciadas
+  em paralelo para inspecionar erro esperado sem rejeição não tratada. Não transformam
+  erros em sucesso financeiro na aplicação; o teste exige tipo/código/constraint.
+- O callback `unit.run(async repos => ...)` chamado blocker no multiprocesso trava
+  Wallet, sinaliza held e aguarda release, retornando void. Serve apenas para garantir
+  sobreposição observável; não altera saldo. Recebe FinancialRepositories reais.
+- `[17,17,16].map((count,index) => ...)` recebe números de chamadas/índice, monta URL
+  do descartável com application_name e chama Bun.spawn com bet-worker.ts já existente.
+  Retorna Subprocess com stdout/stderr em pipe. DWP_BET_DB/COUNT/INPUT são configuração
+  de fixture, não consumer de produção; o worker recusa bancos fora do prefixo de teste.
+- O laço observador consulta pg_stat_activity e pg_blocking_pids por banco/nome até ver
+  três conexões esperando Lock com bloqueador real. Há deadline de 6 s e polling de 10 ms;
+  o tempo decorrido não é evidência de bloqueio. bounded limita operações a 8 s; timeout
+  falha o teste, não tenta corrigir estado financeiro.
+- `children.map(async child => ...)` drena stdout/stderr e aguarda exitCode em paralelo,
+  exige stderr vazio e saída 0, parseia JSON `{pid:number,results:WagerResult[]}`. Retorna
+  relatórios; JSON inválido/filho com erro falha o teste. map/flatMap/filter seguintes
+  extraem PIDs, respostas e flags, sem efeitos. Dinheiro continua string nos DTOs.
+- `finally` libera blocker e encerra somente filhos ainda vivos, aguardando suas
+  saídas com Promise.allSettled. A limpeza dos bancos cabe ao helper externo. Não há
+  sleep arbitrário usado como substituto da observação de locks.
+
+### Comandos executados e resultados reais
+
+Ambiente local: Bun 1.4.3, PostgreSQL 17 em Docker e LocalStack Community 4.14.0 fixado.
+PATH incluiu `.tools/node_modules/.bin`; DATABASE_URL apontou para o usuário local
+restrito `wager_app` em 127.0.0.1:55432/wagering. Helpers criam seus próprios bancos
+`dwp_test_*` e aplicam migrations apenas neles. As suites de infraestrutura rodaram
+por último, após todas as conexões financeiras fecharem, pois reiniciam os serviços.
+
+| Comando | Testes distintos aprovados |
+|---|---:|
+| `bun run check` |494; também typecheck e build sem erros |
+| `bun run test:financial` |34 |
+| `bun run test:persistence` |15 |
+| `bun run test:messaging` |14 |
+| `bun run test:wallet-creation` |25 |
+| `bun run test:bet` |40 |
+| `bun run test:wager` |62 |
+| `bun run test:refund` |57 |
+| `bun run test:orm` |2 |
+| `bun run test:migrations` |2 |
+| `bun run test:infra` |6 (2 PostgreSQL + 4 SQS) |
+| **Total, sem contar reexecuções** |**751**, zero falhas |
+
+A etapa adicionou 73 testes distintos sobre os 678 anteriores: 16 unitários e 57 PostgreSQL
+(4 persistência, 29 funcionais, 15 rollback, 9 concorrência). Saídas reais representativas:
+
+```text
+bun run test:refund
+ 57 pass
+ 0 fail
+ 389 expect() calls
+Ran 57 tests across 4 files. [20.41s]
+
+bun run check
+ 494 pass
+ 0 fail
+ 2584 expect() calls
+Ran 494 tests across 14 files. [423.00ms]
+$ bun x --bun --no-install tsc -p tsconfig.build.json
+```
+
+SQS real emulado aprovou envio, invisibilidade/redelivery, exclusão, DLQ após cinco
+entregas e reprovisionamento após restart/recriação. PostgreSQL aprovou consultas
+com papel restrito e persistência após restart/recriação. Esses testes validam a
+infraestrutura existente; REFUND ainda não passa por transporte HTTP ou SQS.
+
+Inspeção final read-only executada dentro do container PostgreSQL:
+
+```sql
+SELECT count(*) AS public_tables
+FROM information_schema.tables WHERE table_schema='public';
+-- wagering: 0
+SELECT count(*) AS disposable_databases
+FROM pg_database WHERE datname LIKE 'dwp_test_%';
+-- 0
+```
+
+`docker compose ps` mostrou os dois serviços healthy. Nenhuma migration financeira
+foi aplicada ao principal e seu volume foi preservado. Os testes de falhas e reversão
+usaram exclusivamente bancos descartáveis; não apagaram ledger de banco principal.
+
+### Limites e próxima etapa
+
+As evidências cobrem as disputas descritas, sem alegar ausência universal de deadlocks.
+O protocolo deve ser seguido por futuros writers; UNIQUE ainda impede duplicidade
+se um writer o contornar, mas pode resultar em erro SQL/rollback em vez de rejeição
+persistida. O teste 40001 é uma falha SQL injetada, não um deadlock real do detector.
+BET PENDING_REFERENCE é incompatível com o contrato existente; BET PENDING foi testada.
+Down 00007 é reversível sem respostas REFUND novas e recusa downgrade destrutivo quando
+elas existem. Canonicalização BET/WIN/LOSS, Money, DTO v1 e índice por tipo preservados.
+
+A próxima etapa sugerida é ROLLBACK, somente após autorização e decisão explícita sobre
+sua interação com REFUND. O índice por referência/tipo não impede ambos sobre a mesma
+BET. Não foram implementados ROLLBACK, HTTP, consumer, publisher, worker de referências
+ou autenticação. Etapa REFUND encerrada com commits locais; nenhum push.

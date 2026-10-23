@@ -1065,3 +1065,15 @@ cooperativos seguem o protocolo de locks; o UNIQUE protege também writers exter
 mas uma violação SQL inesperada propaga e reverte a unidade inteira, sem fabricar
 uma rejeição de negócio. A API de domínio não consulta o banco nem prova sozinha
 ausência de outro reembolso. Constraints, domínio e coordenação têm papéis distintos.
+
+ADR-026, evidências: nove testes concorrentes reais cobrem dois REFUNDs após commit
+ou rollback do primeiro, disputa com WIN/BET, chegada da referência, carteiras
+independentes, inserção PENDING ainda invisível e bypass direto do UNIQUE. Locks foram
+observados em pg_stat_activity/pg_blocking_pids, com limites de tempo. Cinquenta chamadas
+em três processos Bun geraram um crédito e 49 replays. Não houve deadlock nos cenários
+exercitados; isso não é uma garantia universal sobre futuros writers.
+
+Fechamento: 57 testes PostgreSQL REFUND e 16 unitários novos; 751 testes distintos no
+conjunto, zero falhas, typecheck/build aprovados. PostgreSQL/SQS também passaram suas
+suítes reais de restart/recriação. Principal sem tabelas financeiras e descartáveis
+removidos. ROLLBACK e serviços de transporte/reprocessamento continuam pendentes.
