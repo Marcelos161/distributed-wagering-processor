@@ -417,3 +417,11 @@ GET /wallets/:walletId, GET /wallets/:walletId/ledger?limit=50&cursor=..., POST
 /providers/:providerId/wagering/transactions/:externalTransactionId e POST
 /wallets/:walletId/reconciliation. GET /health/live e /health/ready são públicos.
 `bun run test:api` valida HTTP real em banco descartável e porta efêmera.
+
+### Consumidor de comandos
+
+`bun run worker:consumer` usa wager-transactions.fifo e DLQ já provisionadas.
+SQS_VISIBILITY_SECONDS padrão30 e SQS_RETRY_SECONDS padrão1. A mensagem deve seguir
+o envelope da seção10 do enunciado. `bun run test:consumer` cria filas e banco
+isolados e testa ACK, redelivery, conflitos, DLQ e crash real. SIGTERM drena a mensagem
+corrente; aguarde até timeout SQL30s mais rede/longpoll antes de SIGKILL operacional.

@@ -5345,3 +5345,38 @@ reconciliação; matriz de erros/contrato/key/cursor; readiness indisponível se
 live. Callbacks async propagam falhas e usam PostgreSQL/SQS reais. Teste anterior
 health.http foi atualizado porque readiness agora existe. check494/typecheck/build e
 API3 (54assertions) passaram; enunciado e banco principal preservados.
+
+## 41. Consumidor SQS operacional
+
+`ConsumeWager` (infrastructure/messaging/consume-wager.ts) recebe UOW, processador,
+Clock, SQSClient e ConsumerOptions (fila, nome lógico do consumidor, visibilidade,
+long poll e retry). `runOne():Promise<boolean>` resolve URL, recebe uma mensagem,
+retorna false se vazia; valida envelope/data e calcula SHA256 de type/key/payload
+canônico. A callback UOW recebe repos, chama inbox.receive, pula negócio se processada,
+senão processInTransaction, markProcessed e save. Ao resolver UOW, executa DeleteMessage
+com receipt atual. Resultado true significa mensagem confirmada. Qualquer erro conserva
+mensagem e ajusta visibilidade/backoff, depois propaga para runtime. Erros de negócio
+persistidos retornam normalmente e recebem ACK; erros de admissão vão para DLQ após
+política do broker. `close()` destrói client ao encerrar.
+
+Callback heartbeat serializa ChangeMessageVisibility a cada metade da visibilidade;
+clearInterval/await extending precedem ACK/retry. Caso heartbeat falhe, exclusão ainda
+é PostgreSQL, não timer. O backoff usa número de recebimentos (contagem, não dinheiro).
+ConsumerOptions padrão:30s/longpoll10s/retry1s. `consumer.ts` compõe dependências via
+runWorker e sanitiza falhas de startup. O nome lógico wager-processor-v1 é o mesmo em
+todas as instâncias: não usar PID como consumerName, pois isso quebraria deduplicação.
+
+Fixtures: `queue-support.ts::withQueues(run)` cria FIFO/DLQ únicas e redrive5, executa
+callback e apaga somente suas filas no finally. `send(client,url,body,group?)` usa
+dedupId aleatório para provocar duplicatas reais. `receive` recebe até10 por1s.
+`consumer-child.ts` valida prefixos descartáveis, abre ORM real e proxy do SDK; callback
+send para DeleteMessage sinaliza COMMITTED_BEFORE_ACK e SIGSTOP. Teste envia SIGKILL;
+proxy não modifica transação nem dados. Demais chamadas são encaminhadas ao SDK real.
+
+`consumer.test.ts`: envelope(walletId,messageId,patch) constrói contrato oficial.
+Cinco callbacks async:10entregas concorrentes com mesma identidade (um débito),
+rejeição auditável com ACK; inválida/hash conflitante para DLQ em5recebimentos;
+falha40001 antes do commit sem Inbox parcial e redelivery após remover falha; processo
+morto depois do commit, outro consumer retoma, mensagem LOSS sentinela comprova
+progresso e SIGTERM encerra. Bancos/filas reais isolados, finally fecha filhos/recursos,
+assertReconciled em todos. Typecheck e5testes/38assertions aprovados.

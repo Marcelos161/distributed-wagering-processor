@@ -38,7 +38,9 @@
     "test:rollback": "bun test ./infra/test/rollback.test.ts",
     "worker:references": "bun src/reference-worker.ts",
     "test:references": "bun test ./infra/test/pending-reference.test.ts",
-    "test:api": "bun test ./infra/test/api.test.ts"
+    "test:api": "bun test ./infra/test/api.test.ts",
+    "worker:consumer": "bun src/consumer.ts",
+    "test:consumer": "bun test ./infra/test/consumer.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

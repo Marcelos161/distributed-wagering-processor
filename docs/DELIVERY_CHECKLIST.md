@@ -14,7 +14,7 @@ Os estados abaixo descrevem a auditoria inicial e serão atualizados com evidên
 | Referências pendentes: registro e replay | IMPLEMENTADO E TESTADO | Comprovante e resultado terminal separados |
 | Worker automático de referências | IMPLEMENTADO E TESTADO | 9 testes PostgreSQL, incluindo SIGKILL/restart/SIGTERM, retry e TTL |
 | HTTP financeiro, consultas e paginação | IMPLEMENTADO E TESTADO | API3: sockets HTTP, SQL, paginação, erros e replay |
-| Consumer SQS / ACK pós-commit | PENDENTE | Inbox existente não prova consumer |
+| Consumer SQS / ACK pós-commit | IMPLEMENTADO E TESTADO | consumer5: fila real, redrive/DLQ, concorrência e processo morto após commit antes do ACK |
 | Publisher Outbox | PENDENTE | Claim, confirmação, retry e crash |
 | Reconciliação pública | IMPLEMENTADO E TESTADO | Caso de uso/endpoint validados com saldo consistente; diagnóstico de divergência será ampliado na fase6 |
 | Observabilidade / readiness | PENDENTE | Liveness/log de startup existentes; falta integração |

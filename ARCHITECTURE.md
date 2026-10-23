@@ -1162,3 +1162,28 @@ diferença assinada e lista de issues, sem corrigir nada. Primeira versão2 é v
 para wallet aberta com zero; versão1 existe quando OPENING positiva. Custo linear no
 histórico, apropriado ao desafio; execução longa em carteira quente bloqueia escritas.
 Readiness verifica PostgreSQL/SQS; liveness não consulta dependências.
+
+## ADR-030 — Consumer SQS e ACK após commit
+
+Consumer operacional compartilha ProcessWagerTransaction.processInTransaction com HTTP.
+Ordem: valida envelope/data → Inbox UNIQUE/hash → admissão → Wallet → movimento,
+lifecycle/ledger/Outbox/snapshot → Inbox processada → COMMIT → DeleteMessage. Pendência
+persistida também é aceite definitivo da mensagem: worker de referências assume o job.
+Rejeição financeira confirmada recebe ACK; entrada inválida/conflito/infraestrutura
+não recebe ACK. Broker redrive após5recebimentos move para DLQ, inclusive erros
+persistentes de infraestrutura que exigirão intervenção/redrive após recuperação.
+
+Hash da Inbox inclui type, idempotencyKey e JSON canônico de negócio; exclui occurredAt
+por ser transporte. messageId vem do envelope, não do ID gerado pelo SQS. IDs SQS de
+deduplicação variam nos testes para não deixar FIFO ocultar duplicatas. Heartbeat
+estende visibilidade durante SQL; falha no heartbeat não compromete exclusão do banco.
+Retry usa ChangeMessageVisibility exponencial limitado300s. SIGTERM para novas leituras
+e drena a atual; SIGKILL depende de visibilidade+Inbox. Startup só usa papel restrito.
+
+A janela commit→ACK foi testada com processo real parado exatamente antes do SDK
+DeleteMessage e morto por SIGKILL; reentrega em novo processo não repete débito.
+Fixture intercepta apenas a chamada ACK e usa banco/fila descartáveis; não há chave
+secreta de teste ou crash hook habilitado na aplicação.
+Fontes: https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/API_DeleteMessage.html
+(receipt handle atual) e https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagededuplicationid-property.html
+(deduplicação FIFO de5min não substitui Inbox durável).
