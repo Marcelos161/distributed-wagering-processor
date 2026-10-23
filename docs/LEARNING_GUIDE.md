@@ -5380,3 +5380,33 @@ falha40001 antes do commit sem Inbox parcial e redelivery após remover falha; p
 morto depois do commit, outro consumer retoma, mensagem LOSS sentinela comprova
 progresso e SIGTERM encerra. Bancos/filas reais isolados, finally fecha filhos/recursos,
 assertReconciled em todos. Typecheck e5testes/38assertions aprovados.
+
+## 42. Publisher Outbox com recuperação de lease
+
+`Migration20261023000010.up/down`: cria/remove tabela de claims por evento e permissões
+operacionais de INSERT/UPDATE/DELETE. Down lança55000 com claim existente, preservando
+trabalho em voo. Não altera payload/evento/dinheiro. `OutboxDispatch.constructor(orm,
+leaseMs)` exige inteiro positivo; `claim():Promise<OutboxClaim|null>` abre fork/transaction,
+seleciona evento devido sem lease válida, trava SKIP LOCKED, grava UUID/token e prazo
+pelo relógio PostgreSQL, mapeia mensagem e confirma. `finish(claim,published):Promise<boolean>`
+abre nova transação, exige token/prazo, relê Outbox, chama markPublished ou scheduleRetry,
+atualiza lifecycle e remove claim. false significa dono expirado; erros SQL propagam.
+Nenhum payload mutável ou dinheiro é calculado pelo publisher.
+
+`PublishOutbox.constructor(dispatch,client,eventQueue,commandQueue)` recusa fila igual.
+`runOne()` retorna false se sem evento; caso contrário resolve fila, serializa envelope,
+envia com eventId como dedupId e SHA256(walletId) como group. Somente após confirmação
+chama finish(true). Erro de envio chama finish(false) e propaga; erro após envio deixa
+lease para recuperação, nunca assume publicação confirmada no banco. `close()` fecha
+SDK. `publisher.ts` configura lease60s e fila separada, usa runtime com SIGTERM.
+`provision.py::main` agora cria/reconcilia também events com ensure_queue e valida
+atributos; não apaga mensagens existentes. queues.json declara a topologia extra.
+
+`publisher.test.ts`:3testes reais: duas instâncias disputam duas mensagens sem duplicar
+claim; endpoint SQS indisponível grava retry, lease expirada rejeita finish antigo e
+novo dono retoma; filho SIGKILL depois do SendMessage confirmado reenvia após lease,
+marca publicação e entrega duplicata forçada com eventId idêntico a Inbox downstream
+(dois recebimentos/um efeito). `publisher-child.ts` valida banco/fila descartáveis e
+proxy send aguarda SDK real antes de SIGSTOP; pai mata o processo. Helpers de fila
+existentes fazem isolamento/limpeza. Contagens e saldo reconciliado são assertados,
+sem dinheiro alterado pelo publisher. Typecheck e3testes/23assertions aprovados.

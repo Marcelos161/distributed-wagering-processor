@@ -73,6 +73,15 @@ def main(mode: str) -> None:
         for key, value in expected[kind].items():
             if key not in actual or normalized(key, actual[key]) != normalized(key, value):
                 raise RuntimeError(f"{spec[kind]['name']}: unexpected attribute {key}")
+    events = spec['events']
+    event_url = (ensure_queue(client, events) if mode == 'apply'
+                 else client.get_queue_url(QueueName=events['name'])['QueueUrl'])
+    if mode == 'apply':
+        client.set_queue_attributes(QueueUrl=event_url, Attributes={k: v for k, v in events['attributes'].items() if k != 'FifoQueue'})
+    actual_events = client.get_queue_attributes(QueueUrl=event_url, AttributeNames=['All'])['Attributes']
+    if any(actual_events.get(k) != v for k, v in events['attributes'].items()):
+        raise RuntimeError('Unexpected event queue topology')
+    urls['events'] = event_url
     print(json.dumps({'sqs': 'configured', 'mode': mode, 'queues': urls}))
 
 

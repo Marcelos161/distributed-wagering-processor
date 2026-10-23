@@ -425,3 +425,12 @@ SQS_VISIBILITY_SECONDS padrão30 e SQS_RETRY_SECONDS padrão1. A mensagem deve s
 o envelope da seção10 do enunciado. `bun run test:consumer` cria filas e banco
 isolados e testa ACK, redelivery, conflitos, DLQ e crash real. SIGTERM drena a mensagem
 corrente; aguarde até timeout SQL30s mais rede/longpoll antes de SIGKILL operacional.
+
+### Publicação de eventos
+
+`bun run worker:publisher` envia Outbox para `wager-events.fifo`, provisionada pelo
+hook LocalStack. Para atualizar um container já rodando sem perder mensagens:
+`docker compose exec -T localstack python3 /opt/dwp-sqs/provision.py apply`.
+OUTBOX_LEASE_MS padrão60000; SQS_EVENT_QUEUE_NAME configura destino separado.
+`bun run test:publisher` valida lease, concorrência, falha de SQS e crash pós-envio.
+Entrega at-least-once: consumidores devem deduplicar eventId persistentemente.

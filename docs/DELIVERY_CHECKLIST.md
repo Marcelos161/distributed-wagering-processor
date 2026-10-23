@@ -15,7 +15,7 @@ Os estados abaixo descrevem a auditoria inicial e serão atualizados com evidên
 | Worker automático de referências | IMPLEMENTADO E TESTADO | 9 testes PostgreSQL, incluindo SIGKILL/restart/SIGTERM, retry e TTL |
 | HTTP financeiro, consultas e paginação | IMPLEMENTADO E TESTADO | API3: sockets HTTP, SQL, paginação, erros e replay |
 | Consumer SQS / ACK pós-commit | IMPLEMENTADO E TESTADO | consumer5: fila real, redrive/DLQ, concorrência e processo morto após commit antes do ACK |
-| Publisher Outbox | PENDENTE | Claim, confirmação, retry e crash |
+| Publisher Outbox | IMPLEMENTADO E TESTADO | publisher3, leases concorrentes, falha SQS e SIGKILL após envio |
 | Reconciliação pública | IMPLEMENTADO E TESTADO | Caso de uso/endpoint validados com saldo consistente; diagnóstico de divergência será ampliado na fase6 |
 | Observabilidade / readiness | PENDENTE | Liveness/log de startup existentes; falta integração |
 | ≥3 processos financeiros | IMPLEMENTADO E TESTADO | BET/WIN/REFUND; falta cenário completo de transporte/crash |

@@ -40,7 +40,9 @@
     "test:references": "bun test ./infra/test/pending-reference.test.ts",
     "test:api": "bun test ./infra/test/api.test.ts",
     "worker:consumer": "bun src/consumer.ts",
-    "test:consumer": "bun test ./infra/test/consumer.test.ts"
+    "test:consumer": "bun test ./infra/test/consumer.test.ts",
+    "worker:publisher": "bun src/publisher.ts",
+    "test:publisher": "bun test ./infra/test/publisher.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

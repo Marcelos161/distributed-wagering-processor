@@ -1187,3 +1187,26 @@ secreta de teste ou crash hook habilitado na aplicação.
 Fontes: https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/API_DeleteMessage.html
 (receipt handle atual) e https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/using-messagededuplicationid-property.html
 (deduplicação FIFO de5min não substitui Inbox durável).
+
+## ADR-031 — Publisher com lease persistente e entrega at-least-once
+
+Destino escolhido porque o enunciado não fixa transporte de saída: wager-events.fifo,
+separado de wager-transactions.fifo. Publisher recusa nomes iguais. MessageGroupId é
+SHA256(walletId), dedupId é eventId estável. Eventos são fatos e não comandos; nenhum
+consumidor financeiro escuta a fila de eventos. FIFO reduz duplicatas dentro de5min,
+mas consumidor downstream deve deduplicar eventId via Inbox persistente.
+
+Migration10 cria outbox_claims(event_id,token,lease_until), separada para preservar a
+guarda imutável da Outbox. claim faz SELECT FOR UPDATE SKIP LOCKED e grava lease60s
+usando relógio do banco; confirma essa transação antes de chamar SQS. finish exige
+token e lease ainda válidos, trava registro e marca publishedAt ou scheduleRetry.
+Um dono expirado não pode confirmar ou reagendar o trabalho de outro. Falha entre
+SendMessage e finish deixa lease expirar, portanto envio pode repetir. Não prometemos
+exactly-once nem ordem causal entre eventos distintos publicados em paralelo; wallet
+version no evento permite downstream detectar ordem. Nenhuma repetição altera dinheiro.
+
+SDK tem timeout15s/tentativa e2tentativas, abaixo da lease padrão; pausas arbitrárias de
+processo podem excedê-la, justificando consumidor idempotente. Calls externas não
+mantêm transação financeira nem claim SQL aberta. Falhas incrementam attempts com
+backoff existente1s→5min, sem descarte automático. SIGTERM drena envio atual e fecha
+client/ORM. Down recusa qualquer claim existente; operador deve parar/drain workers.
