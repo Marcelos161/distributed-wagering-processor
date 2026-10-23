@@ -29,7 +29,7 @@ test('SQL enforces inbox uniqueness lifecycle and restricted permissions', async
 test('SQL validates outbox JSON money identity lifecycle and append-only envelope', async () => {
   await withFinancialDatabase('Migration20261023000004', async ({ app, owner }) => {
     const insert = (value: unknown, id = 'event') => app`INSERT INTO outbox_messages (id,aggregate_id,event_type,payload,occurred_at)
-      VALUES (${id},'tx','WagerTransactionProcessed',${app.json(value)},'2026-10-23T12:00:00.123Z')`;
+      VALUES (${id},'tx','WagerTransactionProcessed',${value},'2026-10-23T12:00:00.123Z')`;
     for (const bad of [{}, { ...payload, version: 2 }, { ...payload, data: { ...payload.data, money: { amount: 0, currency: 'BRL' } } },
       { ...payload, data: { ...payload.data, money: { amount: '0.001', currency: 'BRL' } } }]) await expectSqlState(() => insert(bad), '23514');
     await expectSqlState(() => insert(payload, 'different'), '23514');

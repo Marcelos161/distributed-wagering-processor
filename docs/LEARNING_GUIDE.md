@@ -3389,6 +3389,11 @@ Primeiro aplica/up sem pendências/down até00003/reaplica, preservando tabela w
 Segundo prova PK por consumidor, colisão/hash imutável/transição terminal e permissões.
 Terceiro usa helper local insert(value:unknown,id='event')→Promise de INSERT; testa
 JSON faltante/versão inválida/amount number/escala inválida/espelho divergente/duplicação,
-retry/publicação e proibição de alterar payload ou truncar. Usa app.json(value) no
-cliente Bun: JSON.stringify seguido de inferência JSONB duplicava a codificação; o
-CHECK rejeitou corretamente o escalar e a fixture foi corrigida. Todos usam PG real.
+retry/publicação e proibição de alterar payload ou truncar. Passa o objeto diretamente como parâmetro no cliente Bun: JSON.stringify seguido
+de inferência JSONB duplicava a codificação. A tentativa intermediária app.json não
+existe nessa versão e foi recusada pelo typecheck; a fixture foi corrigida para o
+parâmetro objeto nativo. O CHECK não foi relaxado. Todos usam PG real.
+
+Validação SQL da migration00004 após corrigir a fixture: 3 testes reais aprovados,
+35 assertions, incluindo down/up. Typecheck aprovado. A correção da fixture foi
+registrada separadamente; o commit inicial do schema precedeu essa correção.
