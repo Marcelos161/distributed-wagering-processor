@@ -4445,3 +4445,95 @@ fora do escopo; `kind participates...` prova que trocar BET por WIN muda o hash.
 Os 25 testes anteriores de BET continuam ativos, inclusive o hash independente
 `3453cc...cba7`. Execução: typecheck OK; 38 testes de payload, 88 assertions, zero falhas.
 Este incremento só prepara entrada; ainda não credita prêmios nem grava LOSS.
+
+## 31. Resultados terminais e comprovantes de pendência
+
+Resultado histórico é o saldo observado na execução, não o saldo consultado hoje.
+LOSS precisa guardar versão e saldo sob o mesmo lock usado por movimentos: entre
+uma leitura e a gravação poderia haver uma BET concorrente. O preço é serializar
+brevemente LOSS com movimentos da mesma carteira. Wallets diferentes não se bloqueiam.
+
+A migration `Migration20261023000006.ts` mantém a tabela terminal v1 e acrescenta
+`wager_pending_receipts`. Uma WIN aguardando BET guarda um comprovante imutável, que
+não é uma promessa de crédito. Quando o futuro worker concluir, acrescentará um
+resultado terminal na outra tabela. Nada precisa sobrescrever o histórico inicial.
+Não criamos backfill com saldos atuais para transações antigas sem resultado.
+
+### Migration e SQL, função por função
+
+- `up(): Promise<void>`: chamado pelo migrator; enfileira DDL transacional com addSql.
+  Cria comprovantes, PK/FK para transação, schema_version=1, wallet_version positiva
+  e segura, JSON de status PENDING_REFERENCE sem failureCode. Reusa valid_wager_result
+  substituindo o status somente na expressão de validação, nunca no dado armazenado.
+  Cria triggers de consistência/imutabilidade/no-truncate e permissões SELECT/INSERT
+  para app; troca duas funções existentes com CREATE OR REPLACE. Não altera hashes,
+  saldos, ledger, privilégios financeiros nem linhas anteriores.
+- `check_wager_pending_receipt(): trigger`: BEFORE INSERT; NEW é a entrada e NEW o
+  retorno. Busca transação (23503 se inexistente), exige WIN/PENDING_REFERENCE/moeda
+  igual (23514), trava wallet NO KEY UPDATE e compara saldo/versão (23514). CHECKs
+  completam forma JSON e identidade; PK recusa duplicata (23505). Cast inválido pode
+  produzir erro SQL de conversão; toda a transação é revertida. Não chama rede.
+- `check_wager_result(): trigger`: agora aceita BET/WIN/LOSS terminal; compara status,
+  failureCode/moeda com transação, saldo/versão com wallet travada. PROCESSED de BET
+  ou WIN exige ledger correspondente. LOSS não exige ledger, pois a integridade
+  financeira anterior já proíbe lançamento para LOSS. Continua recusando snapshots
+  inventados e mantém as regras de BET. Retorna NEW ou levanta 23514/23503.
+- `require_bet_result(): trigger`: nome legado preservado para o trigger existente;
+  consulta o estado final da operação no COMMIT e exige resultado para os três kinds
+  terminais ou comprovante para WIN pendente. Retorna NULL (AFTER), falha 23514.
+  Diferível permite inserir transação, ledger e resposta na mesma unidade SQL.
+- `down(): Promise<void>`: restaura exatamente as duas funções da versão anterior,
+  remove tabela de comprovantes e sua função. Guarda SQL DO recusa downgrade com
+  comprovantes ou resultados WIN/LOSS (55000), evitando apagar evidências. Testamos
+  ida/volta/reaplicação em banco descartável e a recusa com dados. Remover uma feature
+  com dados financeiros exigirá plano explícito de preservação, fora desta entrega.
+  Sem dados novos, down é reversível; as tabelas financeiras anteriores permanecem.
+
+### Tipos, mapper e repositório
+
+`PendingWagerReceipt` em `wager-result.ts`: transactionId/status fixo/balance readonly,
+failureCode nunca; WagerResult passa a ser união terminal|pendente acrescida de flag
+replay. O DTO BET não ganha campos novos. wallet_version fica no registro persistido.
+`WagerResultRepository` acrescenta findPendingReceipt e insertPendingReceipt; mesma
+sessão/UOW, sem porta paralela ou nova abstração de domínio.
+
+Em `wager-result-mapper.ts`:
+
+| Método | Entrada e retorno | Fluxo, erros e uso |
+|---|---|---|
+| `read` privado | WagerResultRecord → snapshot terminal ou comprovante | Valida versão1, IDs, JSON, Money, teto, campos exatos, escala canônica e versão string segura. Aceita pendência sem failure; rejeições incluem INVALID_REFERENCE/REFERENCE_NOT_FOUND. Congela saída e MoneyProps. TypeError/MoneyError/RangeError em corrupção. Usado pelos três métodos públicos. |
+| `toSnapshot` | registro → WagerResultSnapshot | Delega read e recusa pendente com TypeError; usado na leitura terminal. |
+| `toPendingReceipt` | registro → PendingWagerReceipt | Delega read e exige pendente, senão TypeError; usado na leitura do comprovante. |
+| `toRecord` | snapshot ou comprovante, walletVersion number → WagerResultRecord | Número só para versão, nunca dinheiro; valida inteiro seguro, converte versão em string, lê/valida novamente e retorna registro. Chamado pelos INSERTs. |
+
+Em `wager-result-repository.ts`, construtor conserva FinancialSession. Métodos novos:
+`findPendingReceipt(id: string): Promise<PendingWagerReceipt|null>` faz SELECT
+parametrizado, retorna null se ausente ou chama mapper; `insertPendingReceipt(receipt,
+walletVersion): Promise<void>` mapeia, serializa JSON e faz INSERT parametrizado.
+Propagam erros do mapper, sessão fechada, constraints/duplicidade/permissões SQL.
+Não há UPDATE, UPSERT, publicação ou commit interno. Métodos terminais permanecem.
+
+### Testes deste incremento
+
+`infra/test/wager-support.ts::withWagerDatabase(run): Promise<void>` recebe callback
+assíncrono, abre banco dwp_test_* com migrations até00006, ORM app e UOW, executa
+callback e fecha ORM em finally; infraestrutura existente remove banco. Propaga erro,
+nunca toca principal. `wager-snapshots.test.ts::transaction(walletId,kind,pending=false)`
+cria fixture real de WagerTransaction com Money zero para LOSS/40.50 para WIN,
+referência missing opcional; não persiste, retorna entidade ou erro de domínio.
+
+Callbacks de teste retornam Promise<void>, usam PostgreSQL real/expect e reconciliação:
+`up down reapply...` preserva BET legado sem inventar resposta;
+`%s stores locked historical state...` parametriza WIN/LOSS e confere ledger/versão,
+resultado, recusa de downgrade; `pending receipt is immutable...` confere exigência
+no commit, replay de leitura, versão inválida, duplicidade, permissões e imutabilidade;
+`%s terminal cannot commit...` prova rollback quando falta resultado.
+Em `test/wager-result-mapper.test.ts`, `pending receipts...` prova congelamento,
+roundtrip, separação de tipos e failure indevido; `WIN reference rejection...` prova
+leitura do código aprovado. Nenhuma suíte representa um worker de referências.
+
+Validação executada deste incremento: `bun run check` passou typecheck, 478 testes
+unitários/aplicação e build. `bun test ./infra/test/bet-persistence.test.ts
+./infra/test/wager-snapshots.test.ts`: 12 testes reais, zero falhas. Os novos testes
+precisaram usar enums e objetos esperados tipados nas assertions do Bun/TypeScript;
+a tipagem foi corrigida antes do commit, sem relaxar strict.

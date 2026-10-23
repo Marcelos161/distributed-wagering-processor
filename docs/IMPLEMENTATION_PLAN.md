@@ -258,3 +258,8 @@ Etapa WIN/LOSS autorizada: primeiro incremento compartilha canonicalização sem
 hashes BET. Aprovados comprovante separado de pendência, rejeição auditável de referência
 inválida e rejeição de overflow do saldo. Persistência, processamento, testes reais e
 concorrência serão concluídos nesta etapa; worker de referências permanece fora dela.
+
+Segundo incremento WIN/LOSS: migration00006 e repositório de comprovantes, ampliação
+de snapshots terminais, permissões/imutabilidade e downgrade protegido. Testes reais
+em descartáveis cobrem up/down/reaplicação, consistência e rollback no commit.
+Processamento de WIN/LOSS ainda será integrado; nenhuma migration aplicada ao principal.

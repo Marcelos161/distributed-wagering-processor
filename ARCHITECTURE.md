@@ -976,3 +976,12 @@ BET rejeitada/falha geram INVALID_REFERENCE persistido. Lookup restrito ao prove
 ID que só existe em outro provedor é ausente, sem vazamento entre provedores.
 Crédito que ultrapassa o teto do saldo é rejeitado com DOMAIN_RULE_VIOLATION; Money
 e limite SQL permanecem intactos. Implementação e evidência seguem nos incrementos.
+
+ADR-024, persistência implementada: migration00006 amplia os resultados terminais
+para WIN/LOSS e cria wager_pending_receipts. PK por transação garante um comprovante;
+ambos são imutáveis, com saldo/versão verificados sob lock. Pendência não é resultado
+terminal e não bloqueia a inserção dele futuramente. A função diferível legado
+require_bet_result agora cobre os três kinds e pendências WIN. LOSS mantém as guardas
+anteriores que proíbem ledger. Downgrade restaura versão5 somente sem dados novos;
+com dados WIN/LOSS/pendentes recusa55000, preservando evidência em vez de apagá-la.
+Alternativa de apagar comprovantes automaticamente foi recusada por perda de auditoria.

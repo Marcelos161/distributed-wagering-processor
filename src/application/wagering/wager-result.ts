@@ -9,4 +9,10 @@ export interface WagerResultSnapshot {
   readonly balance: Readonly<MoneyProps>;
   readonly failureCode?: FailureCode;
 }
-export interface WagerResult extends WagerResultSnapshot { readonly idempotentReplay: boolean; }
+export interface PendingWagerReceipt {
+  readonly transactionId: string;
+  readonly status: WagerTransactionStatus.PendingReference;
+  readonly balance: Readonly<MoneyProps>;
+  readonly failureCode?: never;
+}
+export type WagerResult = (WagerResultSnapshot | PendingWagerReceipt) & { readonly idempotentReplay: boolean };

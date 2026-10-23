@@ -1,4 +1,4 @@
-import type { WagerResultSnapshot } from '../wagering/wager-result.js';
+import type { WagerResultSnapshot, PendingWagerReceipt } from '../wagering/wager-result.js';
 
 export interface WagerAdmissionRepository {
   /** Once per transaction, before financial wallet locks or writes. */
@@ -6,5 +6,7 @@ export interface WagerAdmissionRepository {
 }
 export interface WagerResultRepository {
   findByTransactionId(id: string): Promise<WagerResultSnapshot | null>;
+  findPendingReceipt(id: string): Promise<PendingWagerReceipt | null>;
+  insertPendingReceipt(receipt: PendingWagerReceipt, walletVersion: number): Promise<void>;
   insert(result: WagerResultSnapshot, walletVersion: number): Promise<void>;
 }

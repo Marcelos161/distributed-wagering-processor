@@ -1,5 +1,5 @@
 import type { WagerResultRepository } from '../../../application/ports/wager-persistence.js';
-import type { WagerResultSnapshot } from '../../../application/wagering/wager-result.js';
+import type { WagerResultSnapshot, PendingWagerReceipt } from '../../../application/wagering/wager-result.js';
 import { FinancialSession } from './financial-session.js';
 import { WagerResultMapper, type WagerResultRecord } from './wager-result-mapper.js';
 
@@ -9,6 +9,16 @@ export class MikroWagerResultRepository implements WagerResultRepository {
     const [row] = await this.session.execute<WagerResultRecord[]>(
       'SELECT transaction_id, schema_version, wallet_version::text, response FROM wager_transaction_results WHERE transaction_id=?', [id]);
     return row ? WagerResultMapper.toSnapshot(row) : null;
+  }
+  async findPendingReceipt(id: string): Promise<PendingWagerReceipt | null> {
+    const [row] = await this.session.execute<WagerResultRecord[]>(
+      'SELECT transaction_id, schema_version, wallet_version::text, response FROM wager_pending_receipts WHERE transaction_id=?', [id]);
+    return row ? WagerResultMapper.toPendingReceipt(row) : null;
+  }
+  async insertPendingReceipt(receipt: PendingWagerReceipt, walletVersion: number): Promise<void> {
+    const row = WagerResultMapper.toRecord(receipt, walletVersion);
+    await this.session.execute(`INSERT INTO wager_pending_receipts (transaction_id,schema_version,wallet_version,response)
+      VALUES (?,?,?,?::jsonb)`, [row.transaction_id, row.schema_version, row.wallet_version, JSON.stringify(row.response)]);
   }
   async insert(result: WagerResultSnapshot, walletVersion: number): Promise<void> {
     const row = WagerResultMapper.toRecord(result, walletVersion);
