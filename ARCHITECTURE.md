@@ -1109,3 +1109,27 @@ falha atomicamente para revisão explícita; nunca corrige saldo silenciosamente
 recusa respostas ROLLBACK existentes. Sem elas restaura funções00007 e remove o novo
 índice. A aplicação de produção depende sempre de revisão/backup; nossos testes são
 somente em bancos descartáveis. A política não altera os bytes canônicos antigos.
+
+## ADR-028 — Referências com agendamento durável e lock curto
+
+pending_reference_jobs registra attempts/next_attempt_at/completed_at, uma linha por
+transação. Trigger agenda cada PENDING_REFERENCE na mesma SQL transaction; upgrade
+agenda pendências anteriores. Claim usa FOR UPDATE OF job SKIP LOCKED e processa uma
+operação por UOW sem rede externa. Ordem: job → identidade da operação → Wallet.
+Outros fluxos não adquirem jobs depois de travar Wallet existente, evitando ciclo.
+No crash o PostgreSQL reverte efeito e agendamento/libera lock; outro processo retoma.
+Não precisamos de lease para este trabalho curto exclusivamente SQL. Timer de polling
+apenas acorda o worker; o estado de retomada é persistente.
+
+Política configurável: 300 verificações ou 24 horas, o que ocorrer primeiro, backoff
+1s exponencial limitado a5min. O trabalhador sempre tenta validar referência e executar
+antes de aplicar expiração: referência válida que chegou no limite ainda pode concluir.
+Só dependência ainda não disponível expira REFERENCE_NOT_FOUND. Referência inválida
+rejeita imediatamente. Falha SQL reverte também attempts, não vira expiração; erro de
+infraestrutura recebe nova tentativa operacional. Política não apaga receipt original.
+
+Down00009 recusa tentativas/histórico concluído. Jobs nunca tentados podem ser removidos
+porque up os reconstrói exatamente a partir da transação pendente, preservando data.
+Worker encerra admissão ao receber SIGTERM, aguarda trabalho corrente e fecha ORM.
+Consulta SQL do processo tem timeout30s; SIGKILL é validado em teste real, não apenas
+por exceção. Credencial administrativa é recusada no startup como na API.

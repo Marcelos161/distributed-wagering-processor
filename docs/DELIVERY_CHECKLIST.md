@@ -12,7 +12,7 @@ Os estados abaixo descrevem a auditoria inicial e serão atualizados com evidên
 | ROLLBACK e proteção entre compensações | IMPLEMENTADO E TESTADO | 14 testes PostgreSQL, incluindo dois processos e SQL direto; 667 testes executados na fase 1 |
 | Domínio/repositórios Inbox e Outbox | IMPLEMENTADO E TESTADO | Atomicidade local, sem transporte operacional |
 | Referências pendentes: registro e replay | IMPLEMENTADO E TESTADO | Comprovante e resultado terminal separados |
-| Worker automático de referências | PENDENTE | Claim, retry, TTL, recuperação |
+| Worker automático de referências | IMPLEMENTADO E TESTADO | 9 testes PostgreSQL, incluindo SIGKILL/restart/SIGTERM, retry e TTL |
 | HTTP financeiro, consultas e paginação | PENDENTE | Rotas exatas da seção 9 |
 | Consumer SQS / ACK pós-commit | PENDENTE | Inbox existente não prova consumer |
 | Publisher Outbox | PENDENTE | Claim, confirmação, retry e crash |

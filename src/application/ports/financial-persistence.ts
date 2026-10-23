@@ -1,3 +1,4 @@
+import type { PendingReferenceRepository } from './pending-reference-persistence.js';
 import type { InboxRepository, OutboxRepository } from './message-persistence.js';
 import type { WagerAdmissionRepository, WagerResultRepository } from './wager-persistence.js';
 import type { Wallet } from '../../domain/wallet/wallet.js';
@@ -35,6 +36,7 @@ export interface LedgerEntryRepository {
 }
 
 export interface FinancialRepositories {
+  readonly pendingReferences: PendingReferenceRepository;
   readonly wagerAdmission: WagerAdmissionRepository;
   readonly wagerResults: WagerResultRepository;
   readonly inbox: InboxRepository;

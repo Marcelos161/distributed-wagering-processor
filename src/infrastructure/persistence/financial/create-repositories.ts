@@ -1,3 +1,4 @@
+import { MikroPendingReferenceRepository } from './pending-reference-repository.js';
 import { MikroInboxRepository } from './inbox-repository.js';
 import { MikroOutboxRepository } from './outbox-repository.js';
 import type { FinancialRepositories } from '../../../application/ports/financial-persistence.js';
@@ -9,7 +10,7 @@ import { MikroWagerAdmissionRepository } from './wager-admission-repository.js';
 import { MikroWagerResultRepository } from './wager-result-repository.js';
 
 export function createRepositories(session: FinancialSession): FinancialRepositories {
-  return Object.freeze({ wagerAdmission: new MikroWagerAdmissionRepository(session), wagerResults: new MikroWagerResultRepository(session),
+  return Object.freeze({ pendingReferences: new MikroPendingReferenceRepository(session), wagerAdmission: new MikroWagerAdmissionRepository(session), wagerResults: new MikroWagerResultRepository(session),
     inbox: new MikroInboxRepository(session), outbox: new MikroOutboxRepository(session), wallets: new MikroWalletRepository(session),
     transactions: new MikroWagerTransactionRepository(session), ledger: new MikroLedgerEntryRepository(session) });
 }

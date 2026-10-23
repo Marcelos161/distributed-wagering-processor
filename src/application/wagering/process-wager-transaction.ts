@@ -35,6 +35,23 @@ export class ProcessWagerTransaction {
     return this.process(prepareWager(input), repositories);
   }
 
+  /** Called only within the reference worker's durable job claim. No external I/O. */
+  async resumeInTransaction(id: string, repos: FinancialRepositories, expire: boolean): Promise<WagerResult | null> {
+    const candidate = await repos.transactions.findById(id);
+    if (!candidate) throw new Error('Pending transaction disappeared');
+    await repos.wagerAdmission.lock(candidate.providerId, candidate.idempotencyKey, candidate.externalTransactionId);
+    const tx = (await repos.transactions.findById(id))!;
+    if (tx.isTerminal()) {
+      const result = await repos.wagerResults.findByTransactionId(id);
+      if (!result) throw new Error('Terminal transaction has no historical result');
+      return Object.freeze({ ...result, idempotentReplay: true });
+    }
+    if (tx.status !== WagerTransactionStatus.PendingReference) throw new Error('Only pending references can resume');
+    const wallet = await repos.wallets.findByIdForUpdate(tx.walletId);
+    if (!wallet) throw new Error('Pending wallet disappeared');
+    return this.settle(tx, wallet, repos, this.clock.now(), true, expire);
+  }
+
   private async process(prepared: PreparedWager, repos: FinancialRepositories): Promise<WagerResult> {
     const { input, money, payloadHash } = prepared;
     await repos.wagerAdmission.lock(input.providerId, input.idempotencyKey, input.externalTransactionId);
@@ -61,13 +78,20 @@ export class ProcessWagerTransaction {
     const tx = WagerTransaction.create({ ...input, kind: input.kind as WagerTransactionKind, money,
       id: this.ids.next(), payloadHash, createdAt: at });
     await repos.transactions.insert(tx); // Initial PENDING; this call persists a terminal result or a pending-reference receipt.
-    // Read after the wallet lock: same-wallet writers commit before this SELECT.
-    // Do not acquire reference identity/wallet locks here: that would invert admission order.
-    const reference = input.referenceExternalTransactionId === undefined ? undefined
-      : (await repos.transactions.findByExternalId(input.providerId, input.referenceExternalTransactionId)) ?? undefined;
-    const previousRefund = tx.requiresReference() && reference
-      ? await repos.transactions.findProcessedReversal(reference.id) : null;
-    const movement = this.apply(tx, wallet, reference, at, previousRefund);
+    return (await this.settle(tx, wallet, repos, at))!;
+  }
+
+  private async settle(tx: WagerTransaction, wallet: Wallet, repos: FinancialRepositories, at: Date,
+    resuming = false, expire = false): Promise<WagerResult | null> {
+    // No reference identity lock after the wallet: preserve admission order.
+    const reference = tx.referenceExternalTransactionId === undefined ? undefined
+      : (await repos.transactions.findByExternalId(tx.providerId, tx.referenceExternalTransactionId)) ?? undefined;
+    const previous = tx.requiresReference() && reference ? await repos.transactions.findProcessedReversal(reference.id) : null;
+    const movement = this.apply(tx, wallet, reference, at, previous);
+    if (resuming && tx.status === WagerTransactionStatus.PendingReference) {
+      if (!expire) return null;
+      tx.reject(FailureCode.ReferenceNotFound);
+    }
     if (movement) await repos.wallets.save(wallet);
     await repos.transactions.updateLifecycle(tx);
     if (movement) await repos.ledger.insert(movement.entry, movement.walletVersion);
@@ -104,7 +128,9 @@ export class ProcessWagerTransaction {
         else tx.ledgerDirectionFor(reference);
       } catch (error) {
         if (!(error instanceof WagerTransactionError)) throw error;
-        if (error.code === 'REFERENCE_REQUIRED' || error.code === 'REFERENCE_NOT_PROCESSED') tx.markPendingReference();
+        if (error.code === 'REFERENCE_REQUIRED' || error.code === 'REFERENCE_NOT_PROCESSED') {
+          if (tx.status === WagerTransactionStatus.Pending) tx.markPendingReference();
+        }
         else if (error.code === 'INVALID_REFERENCE') tx.reject(FailureCode.InvalidReference);
         else if (error.code === 'DUPLICATE_REVERSAL') tx.reject(FailureCode.DuplicateReversal);
         else throw error;

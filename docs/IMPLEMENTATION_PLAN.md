@@ -316,3 +316,7 @@ commits e validações por fase. A auditoria operacional está em DELIVERY_CHECK
 Fase1 integra ROLLBACK e proteção cruzada persistente; não requer novo prompt para
 prosseguir ao worker, API, consumer/publisher e validação final. Esta autorização
 substitui as pausas históricas descritas acima, sem autorizar destruição do principal.
+
+Fase2 da missão final: worker de referências e migration00009 entregues. Nove testes
+reais aprovados, incluindo crash do processo e recuperação, saldo relido e expiração.
+Avançar automaticamente para API HTTP, sem aplicar migrations ao principal.

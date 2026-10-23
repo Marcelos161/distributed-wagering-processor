@@ -398,3 +398,11 @@ commit/rollback concorrente, referência chegando depois e um INSERT SQL direto 
 o índice de reversão. A soma final das suítes documentadas nesta etapa é 751 testes
 distintos aprovados, incluindo os 6 de infraestrutura. Evidências e explicação de
 cada callback estão nas seções 34–37 de `LEARNING_GUIDE.md`.
+
+### Worker de referências
+
+Depois de aplicar migrations no banco local de avaliação escolhido, execute em outro
+terminal `bun run worker:references`. Os parâmetros REFERENCE_* de `.env.example`
+controlam300tentativas/TTL24h/backoff1s→5min. `bun run test:references` cria seus próprios
+bancos descartáveis; não requer migrar wagering. O worker suporta SIGTERM e retomada
+após SIGKILL. Ele não publica eventos: apenas persiste Outbox com o resultado financeiro.

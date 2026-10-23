@@ -35,7 +35,9 @@
     "test:bet": "bun test ./infra/test/bet-*.test.ts",
     "test:wager": "bun test ./infra/test/wager-*.test.ts",
     "test:refund": "bun test ./infra/test/refund-*.test.ts",
-    "test:rollback": "bun test ./infra/test/rollback.test.ts"
+    "test:rollback": "bun test ./infra/test/rollback.test.ts",
+    "worker:references": "bun src/reference-worker.ts",
+    "test:references": "bun test ./infra/test/pending-reference.test.ts"
   },
   "dependencies": {
     "@mikro-orm/core": "7.2.5",

@@ -5264,3 +5264,46 @@ refund57, bet40 e wager62 aprovaram em PostgreSQL real. Total executado neste in
 667testes distintos, zero falhas. Dois testes inicialmente reutilizaram a key da BET
 na fixture WIN; corrigida a identidade da fixture, mantendo a detecção de conflito.
 `bun run test:rollback` reproduz os14cenários novos.
+
+## 39. Worker de referências pendentes
+
+Uma pendência não é rejeição e não pode depender de uma fila em memória. A migration9
+cria agendamento durável no mesmo commit do receipt. Depois que a BET chegar, o worker
+recarrega a referência e o saldo atual; não aplica o saldo antigo do comprovante.
+Dois workers usam SKIP LOCKED para não executar o mesmo job. O lock cobre apenas SQL;
+um crash libera o trabalho sem confirmar efeitos parciais. Sem timer persistente, o
+polling pode reiniciar porque next_attempt_at está no PostgreSQL.
+
+| Arquivo / função | Contrato, fluxo, erros e chamadores |
+|---|---|
+| `Migration20261023000009.up/down` | Sem parâmetros, Promise<void>, chamadas pelo migrator. Up cria tabela/índice/trigger, backfill de pendentes e privilégios restritos; down recusa55000 se há tentativas, remove apenas agendamento ainda reconstruível. Falhas DDL revertem a unidade. |
+| SQL `schedule_pending_reference()` | Trigger AFTER INSERT/UPDATE de status recebe NEW, insere job por ID/data somente para PENDING_REFERENCE, ON CONFLICT não sobrescreve tentativas, retorna NEW. SECURITY DEFINER com search_path fixo e nomes qualificados permite agendar sem conceder INSERT direto ao app; EXECUTE público revogado. |
+| `PendingReferenceRepository` | Porta claimDue(now:Date), reschedule(id:string,next:Date), complete(id:string,now:Date); retornos Promise<Job|null>/Promise<void>. Job contém ID, attempts:number e createdAt:Date; não contém dinheiro. |
+| `MikroPendingReferenceRepository.constructor/claimDue` | Recebe FinancialSession; SELECT ordena data/ID, limita1 e trava job com SKIP LOCKED; retorna objeto ou null e registra ID reivindicado nesta sessão. Chamado por ResolvePendingReferences. Segundo claim na mesma unidade lança Error. |
+| `reschedule/complete/assertClaim` | Exigem ID reivindicado; atualizam attempts+1 e próxima data ou completed_at. assertClaim retorna void/lança Error para ID indevido; erros SQL propagam. A transação externa é responsável pelo commit. |
+| `ProcessWagerTransaction.resumeInTransaction(id,repos,expire)` | Promise<WagerResult|null>. Carrega identidade, trava admissão, relê status, retorna histórico se já terminal; trava Wallet e delega settle. Falta de registros/estado indevido lança Error e aborta job. Chamador exclusivo: worker sob claim. |
+| `settle(tx,wallet,repos,at,resuming=false,expire=false)` | Extração do caminho já testado, Promise<WagerResult|null>. Resolve referência/compensação, aplica domínio, persiste lifecycle/movimento/eventos/resultado. Espera repetida retorna null sem recriar receipt/evento. Se expire e continua sem dependência, rejeita REFERENCE_NOT_FOUND. Chamado por process e resumeInTransaction. |
+| `apply` | Ao aguardar referência, chama markPendingReference só quando ainda PENDING. Reidratação de PENDING_REFERENCE não repete essa transição. Crédito/débito e regras continuam os mesmos. |
+| `ResolvePendingReferences.constructor` | unit/process/Clock/policy; exige inteiros positivos, maxAttempts<=1000000 e maxDelay>=initialDelay. Inválidos lançam Error no startup. Não acessa banco. |
+| `runOne()` | Promise<boolean>, true se pegou job, false se nenhum devido. Uma UOW faz claim, calcula limite, chama resume; terminal completa job, pendente agenda min(maxDelay,initialDelay*2^attempts). Falha reverte tudo, inclusive attempts. Chamador: runtime e testes. |
+| `positiveInteger(env,name,fallback,maximum)` | worker-configuration.ts; valida texto inteiro positivo, converte contagem/tempo (nunca dinheiro), retorna number ou Error sem revelar valor recebido. |
+| `referencePolicy(env)` | Retorna ReferenceRetryPolicy com defaults300/24h/1s/5min e overrides explícitos REFERENCE_*. Usada pelo entrypoint; configuração inválida interrompe startup. |
+| `runWorker(role,build)` | worker-runtime.ts; abre ORM restrito, valida roleSQL, monta contexto e tarefa, instala SIGINT/SIGTERM, chama runOne até parar. Sem trabalho aguarda250ms; erro loga somente código sanitizado e tenta após1s. Finally fecha tarefa/ORM e remove handlers. Erros de startup propagam. |
+| callbacks `stop/build` | stop():void muda flag de admissão; build(WorkerContext):WorkerTask instancia o resolver. runOne corrente termina antes do fechamento. reference-worker.ts é entrypoint Bun; não migra banco. |
+| `createRepositories` | Acrescenta pendingReferences à mesma FinancialSession, preservando transação única e as portas existentes. |
+
+`infra/test/pending-reference.test.ts`: nove testes reais. Três test.each(kind) criam
+WIN/REFUND/ROLLBACK antes da BET, verificam backoff e conclusão sem apagar receipt.
+Três test.each(reason) verificam maxAttempts/TTL/referência terminal inválida e replay.
+O teste de dois workers pausa a primeira UOW após processar, comprova SKIP LOCKED e
+rollback do agendamento, depois conclui com outra execução. O teste de processo inicia
+reference-worker.ts, observa espera no PostgreSQL, envia SIGKILL, reinicia e exige
+conclusão e saída0 após SIGTERM. Callbacks spawn/observe/drain só gerenciam processos
+de teste; finally encerra filhos. O último injeta40001 no INSERT do resultado, prova
+attempts=0 após erro e, sem trigger de falha, rejeita ROLLBACK de WIN por saldo atual
+insuficiente. Todos callbacks retornam Promise<void>, propagam assertions/timeouts e
+reconciliam saldo com ledger. Nenhum teste modifica o banco principal.
+
+Evidência fase2: check494/typecheck/build, referências9, ROLLBACK14 e regressão de
+persistência REFUND4 passaram. O handler catch do entrypoint imprime somente
+role/status startup_failed, sem exception/connection string, define exitCode1.
