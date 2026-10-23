@@ -281,3 +281,11 @@ testes. Docker/PostgreSQL precisam estar saudáveis. Para `bun run check`, confi
 `DATABASE_URL` local como em `.env.example`: o teste HTTP inicia Nest e valida a
 conexão. A ausência dessa variável causa falha de configuração, não deve ser
 substituída por mock.
+
+`bun run test:persistence` inclui agora mappers, repositórios, unidade transacional e
+concorrência. Os cenários concorrentes observam `pg_stat_activity`/`pg_blocking_pids`
+no banco descartável e usam três unidades independentes; não exigem alterar permissões
+de produção. Os repositórios só funcionam dentro da unidade injetada por
+`FINANCIAL_UNIT_OF_WORK`. Um futuro serviço deve chamar `unit.run(async repos => ...)`
+e aguardar cada operação; não guardar repos/Wallet para reutilizar na próxima execução.
+A aplicação continua sem migrations financeiras no banco principal nesta entrega.

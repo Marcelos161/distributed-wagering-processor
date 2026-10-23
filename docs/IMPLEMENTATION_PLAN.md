@@ -169,3 +169,21 @@ lookup com escopo do provedor, ledger só INSERT/SELECT, sessão/ownership e lei
 FOR NO KEY UPDATE. Testes dos adaptadores usam transactional oficial em bancos
 isolados. Próximo incremento nesta autorização: unidade transacional injetável e
 provas concorrentes de espera/liberação/saldo atualizado, sem casos de uso públicos.
+
+Terceiro incremento complementar à etapa8: MikroFinancialUnitOfWork injetável, fork
+por operação, READ COMMITTED, transactional oficial e recusa de fronteiras aninhadas.
+Atomicidade de abertura, erro de callback/commit diferível, descarte de objetos e
+permissões validados em bancos descartáveis. Testes concorrentes observam bloqueio
+no PostgreSQL e confirmam atualização do saldo após commit/rollback, avanço de wallet
+diferente e compatibilidade com KEY SHARE. Implementação desta etapa encerrada; nenhuma
+migration financeira aplicada ao principal e nenhum endpoint/consumer financeiro.
+
+Próxima etapa recomendada, mediante nova autorização: contratos/eventos e desenho
+transacional de Inbox/Outbox e seus repositórios na mesma fronteira, antes de expor
+casos de uso financeiros com publicação. Política de tentativas/TTL, relay, replay
+HTTP e tratamento completo da idempotência continuam pendentes. Não iniciados aqui.
+
+Evidência final desta etapa: 483 testes distintos aprovados (424 aplicação/unitários,
+15 persistência,34 schema,6 infraestrutura,2 ORM,2 migrations), typecheck/build OK.
+Trabalho dividido em mappers, repositórios+operação de lock e unidade transacional+
+provas concorrentes. Commits locais; sem push. As etapas seguintes continuam pendentes.

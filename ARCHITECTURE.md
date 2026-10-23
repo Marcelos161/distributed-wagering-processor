@@ -676,3 +676,47 @@ escritores externos existem). Para abertura, ordem wallet → transação → le
 referências processadas precisam existir antes de atualizar/inserir dependente.
 Futuras operações com várias wallets devem adquirir todos os locks primeiro; esta
 etapa não oferece um caso de uso de transferência. Não há lock global ou mutex.
+
+## ADR-015 — Fronteira transacional financeira e evidência de concorrência
+
+MikroFinancialUnitOfWork implementa a porta com `run(callback)`, injetado pelo token
+FINANCIAL_UNIT_OF_WORK. Recebe o ORM de aplicação já validado pelo startup; não lê
+MIGRATION_DATABASE_URL e não cria schema. Cada run cria fork limpo/useContext:false,
+usa transactional oficial em READ COMMITTED e cria uma sessão compartilhada pelos
+três adaptadores. AsyncLocalStorage recusa fronteira financeira aninhada; helpers
+internos devem receber os repositórios existentes. Chamadas concorrentes externas
+usam contextos independentes, não uma fila global.
+
+READ COMMITTED + lock obtido antes da decisão é suficiente para os cenários de wallet
+serializados testados; alternativa SERIALIZABLE exigiria tratamento explícito de
+serialization failures. Não há retries automáticos nesta etapa: eles precisam repetir
+a operação inteira com objetos novos e serão definidos com idempotência/casos de uso.
+O ORM faz flush após callback; nenhuma entidade financeira está em dirty checking,
+portanto os INSERT/UPDATE já ocorreram pelo em.execute. O commit roda as constraints
+diferíveis; run só resolve depois dele. Erro no callback ou commit rejeita e faz rollback.
+Fechar a sessão no finally impede usar repos escapados. WeakMaps guardam tokens Symbol,
+não referências aos EntityManagers; objetos antigos não mantêm o pool/contexto vivo.
+
+Rollback restaura o banco, não Money/Wallet/WagerTransaction em memória. Mesmo objeto
+anterior com valores aparentemente corretos não é reutilizável para escrita por estes
+adaptadores: recarregar via nova sessão, lockar e decidir novamente. O contrato exige
+await em todas as chamadas: não iniciar tarefas soltas/efeitos externos no callback.
+Inbox/Outbox futuras precisam gravar usando o **mesmo EM/SQL transaction**, estendendo
+as portas deste escopo. A publicação SQS pertence a um relay depois do commit.
+Nada nesta etapa implementa o relay ou autoriza responder replay HTTP como concluído.
+
+Prova concorrente em PostgreSQL real: barreiras mantêm sessão A com lock e crédito
+não confirmado; sessão B lê snapshot antigo, insere FK (KEY SHARE compatível), tenta
+NO KEY UPDATE e é observada em pg_stat_activity/pg_blocking_pids como bloqueada por A.
+Enquanto isso C movimenta outra wallet e confirma. Liberar A por commit faz B ler110;
+rollback faz B ler100; B credita20 e o banco termina130/v3 ou120/v2, respectivamente.
+PIDs distintos, resultados exatos e ausência de deadlock são exigidos nos dois cenários.
+Polling de observação não presume aquisição por atraso. Isso não prova ausência
+universal de deadlocks nem performance sob carga ou resiliência a falhas de rede.
+
+Referências: [MikroORM transactions](https://mikro-orm.io/docs/transactions),
+[Unit of Work](https://mikro-orm.io/docs/unit-of-work),
+[PostgreSQL17 locks](https://www.postgresql.org/docs/17/explicit-locking.html).
+A implementação instalada 7.2.5 também foi inspecionada: SqlEntityManager.execute usa
+getTransactionContext; TransactionManager.executeTransactionFlow chama flush antes
+que Connection.transactional tente confirmar. Nenhuma migration foi alterada.

@@ -3,10 +3,11 @@ import type { Wallet } from '../../../domain/wallet/wallet.js';
 import type { WagerTransaction } from '../../../domain/wagering/wager-transaction.js';
 
 // Object ownership only: never a distributed lock or an idempotency guarantee.
-const walletOwners = new WeakMap<Wallet, FinancialSession>();
-const transactionOwners = new WeakMap<WagerTransaction, FinancialSession>();
+const walletOwners = new WeakMap<Wallet, symbol>();
+const transactionOwners = new WeakMap<WagerTransaction, symbol>();
 
 export class FinancialSession {
+  readonly #identity = Symbol('financial session');
   #active = true;
   #lastLockedId: string | undefined;
   readonly #wallets = new WeakMap<Wallet, { locked: boolean; version: number }>();
@@ -37,8 +38,8 @@ export class FinancialSession {
   attachWallet(wallet: Wallet, locked: boolean): void {
     this.assertActive();
     const owner = walletOwners.get(wallet);
-    if (owner && owner !== this) throw new Error('Reload Wallet in the current transaction; do not reuse an earlier instance');
-    walletOwners.set(wallet, this);
+    if (owner && owner !== this.#identity) throw new Error('Reload Wallet in the current transaction; do not reuse an earlier instance');
+    walletOwners.set(wallet, this.#identity);
     this.#wallets.set(wallet, { locked, version: wallet.version });
   }
 
@@ -57,12 +58,12 @@ export class FinancialSession {
   attachTransaction(transaction: WagerTransaction): void {
     this.assertActive();
     const owner = transactionOwners.get(transaction);
-    if (owner && owner !== this) throw new Error('Reload WagerTransaction in the current transaction');
-    transactionOwners.set(transaction, this);
+    if (owner && owner !== this.#identity) throw new Error('Reload WagerTransaction in the current transaction');
+    transactionOwners.set(transaction, this.#identity);
   }
 
   assertTransaction(transaction: WagerTransaction): void {
     this.assertActive();
-    if (transactionOwners.get(transaction) !== this) throw new Error('Load or insert WagerTransaction in the current transaction');
+    if (transactionOwners.get(transaction) !== this.#identity) throw new Error('Load or insert WagerTransaction in the current transaction');
   }
 }

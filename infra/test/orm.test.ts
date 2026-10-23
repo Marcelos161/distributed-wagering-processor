@@ -1,3 +1,4 @@
+import { FINANCIAL_UNIT_OF_WORK, type FinancialUnitOfWork } from '../../src/application/ports/financial-persistence.js';
 import { expect, test } from 'bun:test';
 import { MikroORM } from '@mikro-orm/postgresql';
 import type { INestApplication } from '@nestjs/common';
@@ -14,6 +15,8 @@ test('Nest injects a real PostgreSQL ORM using only the application role', async
     try {
       app = await createApplication({ logger: false });
       await app.listen(0, '127.0.0.1');
+      const unit = app.get<FinancialUnitOfWork>(FINANCIAL_UNIT_OF_WORK);
+      expect(await unit.run(async () => 'transactional provider ready')).toBe('transactional provider ready');
       const orm = app.get(MikroORM);
       const em = orm.em.fork();
       const result = await em.execute<Array<{ username: string; database: string }>>(

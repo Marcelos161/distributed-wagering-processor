@@ -3084,3 +3084,194 @@ Validação dos repositórios: typecheck/build e 424 testes existentes+unitário
 `bun run test:persistence` passou 6 testes (2 mappers + 4 repositórios), em PostgreSQL
 real descartável. A abstração de unidade transacional da aplicação ainda não estava
 implementada neste commit; os testes usam diretamente EntityManager.transactional.
+
+## 19. Unidade transacional, commit, rollback e concorrência observável
+
+**Caminho completo:** Nest cria o ORM com DATABASE_URL de wager_app e valida o papel;
+a factory de DI fornece a unidade; um futuro caso de uso chama run; a unidade abre
+transação em um fork; os três repositórios compartilham essa sessão; a leitura com
+lock espera sua vez e retorna linha atual; mapper.rehydrate cria objetos; métodos de
+domínio produzem estado/ledger; mappers geram strings/datas; em.execute envia SQL na
+conexão transacional; callback termina; ORM executa flush; PostgreSQL avalia constraints
+diferíveis e confirma; só então a Promise de run resolve. Em falha, rejeita e desfaz
+as escritas. Hoje apenas fixtures de teste percorrem esse caminho financeiro.
+
+**Exemplo de aposta, apenas explicativo:** saldo R$100, aposta R$10. O futuro caso de
+uso deve adquirir lock antes de decidir, chamar wallet.debit, salvar100→90/v2 e
+persistir BET PROCESSED + DEBIT10/antes100/depois90 na mesma transação. Se qualquer
+parte faltar, o commit falha. Uma BET recusada permanece sem ledger. Depois desse
+commit, a Outbox permitirá publicação confiável por outro processo; publicar SQS
+agora criaria risco de evento que descreve dinheiro ainda não confirmado.
+
+### O que significa cada garantia
+
+- **Unit of Work do ORM:** rastreia alterações de entidades gerenciadas e prepara SQL
+  no flush. **Nossa unidade transacional:** delimita uma operação atômica e fornece
+  os adaptadores. São conceitos relacionados, não o mesmo objeto. Nosso SQL explícito
+  é executado antes do flush; flush não confirma a transação nem garante sozinho que
+  as constraints diferíveis passaram.
+- **Identity Map:** cache de instâncias gerenciadas por identidade dentro de um EM.
+  Não utilizamos esse cache para Wallet; cada SELECT/mapper devolve instância nova.
+  Assim, uma leitura antiga não substitui a linha retornada pela consulta com lock.
+- **Commit:** torna o conjunto visível a outras sessões e conclui as verificações
+  diferidas. Um callback que retornou normalmente pode ter seu commit recusado.
+- **Rollback:** desfaz alterações SQL e libera locks. Não volta no tempo no heap JS:
+  uma Wallet creditada110 pode continuar110 em memória, enquanto o banco permanece100.
+  Descartar/recarregar é obrigatório; ownership da sessão impede salvar o objeto antigo.
+- **Isolamento READ COMMITTED:** cada comando lê dados confirmados apropriados ao
+  momento da consulta. O lock pessimista serializa decisões da mesma wallet. Não
+  basta SELECT antigo seguido de UPDATE: a decisão deve usar a leitura com lock.
+- **Imutabilidade/encapsulamento:** o ORM não precisa abrir campos privados nem colocar
+  setters no ledger; getters exportam snapshot, mapper converte e INSERT persiste.
+  Reidratação usa factories existentes. Atualizar Wallet grava só seu estado mutável.
+
+### Locks de linha
+
+| Modo | Uso relevante | Compatibilidade relevante |
+|---|---|---|
+| FOR UPDATE | Protege inclusive contra alteração/remoção da chave | Conflita com KEY SHARE; pode formar o ciclo já encontrado com FKs concorrentes. |
+| FOR NO KEY UPDATE | Protege alteração de saldo/versão sem trocar PK | Conflita com outro NO KEY UPDATE/UPDATE, mas permite KEY SHARE. Escolhido para Wallet. |
+| FOR KEY SHARE | Protege chave referenciada, comum em validações de FK | Impede remoção/mudança de chave, permite a atualização não-chave do saldo. |
+
+O lock existe no PostgreSQL, vale para qualquer processo/conexão e dura até commit ou
+rollback. Não é um mutex JavaScript nem se limita à ordem FIFO do broker. Adquirir IDs
+em ordem lexical crescente reduz ciclos; referências/identidades imutáveis e ordem
+wallet → transação → ledger preservam as FKs. Não há garantia de ausência universal de
+deadlocks: timeouts/retries futuros precisam considerar outros recursos e recomeçar
+com nova unidade. Nenhum retry automático é feito aqui.
+
+### Código da fronteira e DI
+
+`src/infrastructure/persistence/financial/financial-unit-of-work.ts`:
+
+- `MikroFinancialUnitOfWork.constructor(orm:MikroORM)`: guarda o ORM de aplicação;
+  retorna instância, não abre transação. Chamado pela factory Nest e testes. A conexão
+  restrita vem do módulo existente; testes usam ORM app separado do ORM de migrations.
+- `run<T>(work:(FinancialRepositories)=>Promise<T>):Promise<T>`: primeiro verifica
+  AsyncLocalStorage; se já há unidade financeira nesse fluxo, rejeita. Abre contexto
+  assíncrono, cria fork limpo sem reutilizar contexto global, chama transactional com
+  READ_COMMITTED/clear:true, cria FinancialSession e repos, aguarda work, fecha sessão
+  em finally. O retorno só atravessa transactional depois do commit. Erros originais
+  propagam (ex.: SQLSTATE23514,23505,42501); não são convertidos em sucesso/replay.
+  Chamadores futuros recebem só portas, não EM/SQL livre. Exemplo de fixture:
+  `await unit.run(repos => persistOpening(repos))`.
+- Callbacks internos de `activeBoundary.run` e `fork.transactional` retornam a Promise
+  da execução; o segundo recebe EM transacional. O callback `work` é fornecido pelo
+  chamador. Não existem begin/commit manuais duplicados nem savepoints financeiros
+  aninhados. Todas as Promises de repositório devem ser aguardadas; proibido deixar
+  trabalho solto ou publicação externa dentro de work.
+
+`persistence.module.ts` já tinha factory de opções do ORM. A nova `useFactory(orm:
+MikroORM):MikroFinancialUnitOfWork` apenas constrói o adaptador, injetado pelo ORM oficial,
+registra e exporta FINANCIAL_UNIT_OF_WORK. Não adiciona controllers nem inicializa
+migrations. `infra/test/orm.test.ts`, no teste Nest existente, agora resolve a porta
+por DI e executa callback que devolve texto; confirma provider e transação reais sem
+precisar de schema financeiro nesse banco. Isso não substitui os testes financeiros.
+
+### Testes transacionais e permissões
+
+`infra/test/persistence-unit-of-work.test.ts`: todos os callbacks recebem nenhum
+argumento, retornam Promise<void>, usam withPersistenceDatabase e falham em assertion/
+erro inesperado. Não são funções de produção:
+
+| Nome do teste | Fluxo / evidência esperada |
+|---|---|
+| financial boundary confirms opening together and returns only after commit | run grava abertura; consulta por outra conexão após retorno vê uma wallet, uma tx e um ledger. |
+| explicit callback error rolls back all opening records | Grava os três, lança erro antes de retornar; três contagens ficam zero. |
+| deferred commit failure rejects a completed callback and rolls back every write | Grava abertura correta e outra wallet positiva sem ledger; callback marca flag e retorna; commit23514 rejeita; todas as tabelas ficam vazias, inclusive abertura correta. |
+| rollback leaves JavaScript mutated but forbids reuse and reloads persisted wallet | Wallet100 é creditada110 e SQL gravado, depois erro; objeto antigo continua110, repo escapado e reuse falham; nova leitura lockada retorna100/v1, sem tx/ledger abortados; novo crédito0.10 confirma. |
+| nested financial boundaries fail and leave the outer scope usable | Tentativa de run interno é rejeitada sem abrir savepoint; callback externo trata esse erro local e confirma abertura. Outra run externa funciona. |
+| application adapter role cannot run DDL or mutate ledger and constraints stay enabled | ORM app confirma current_user; CREATE TABLE, UPDATE/DELETE ledger, desabilitar triggers e replication_role falham42501; catálogo confirma três constraint triggers habilitadas/diferíveis/inicialmente diferidas. |
+| zero opening needs neither financial transaction nor ledger | Wallet.open zero retorna entry null; INSERT confirma0.00/v1 sem tx/ledger. Não força OPENING de valor zero. |
+
+### Testes concorrentes sem presumir locks por tempo
+
+Arquivo `infra/test/persistence-locking.test.ts`:
+
+- `gate():{ready:Promise<void>,open:()=>void}`: cria barreira explícita; executor recebe
+  resolve e open o libera, de forma idempotente. Controla quando A permite commit.
+  Não tem timer nem simula lock. Chamado pelos dois cenários.
+- `within<T>(operation:Promise<T>,description:string):Promise<T>`: corre operação contra
+  watchdog de5s; retorna resultado ou rejeita com contexto, limpa timer em finally.
+  Watchdog limita teste travado, não prova sucesso. O watchdog não cancela consulta;
+  finally dos cenários libera a barreira e aguarda sessões antes de apagar o banco.
+- `observeBlockedWallet(sql:SQL):Promise<{pid:number,blockers:number[]}>`: consulta
+  pg_stat_activity do banco atual, filtra espera Lock no SELECT FOR NO KEY UPDATE e
+  exige pg_blocking_pids não vazio. Repete com cadência10ms até limite4s; erro se nunca
+  observar. **Resultado do servidor**, não tempo decorrido, confirma bloqueio.
+- Callback de cada `independent sessions serialize wallet decisions and release locks
+  after commit/rollback`: seed wallets A/B; primeira unidade locka A, credita10 e abre
+  held; segunda lê100, insere PENDING com FK KEY SHARE, tenta lock; observador confirma
+  PID distinto bloqueado; terceira unidade locka B, credita30 e confirma enquanto A
+  ainda segura o lock. Release libera primeira, por commit ou erro intencional. Segunda
+  recebe objeto novo110 ou100 e credita20. SQL final exige130/v3 ou120/v2; primeira tx
+  só existe no commit. Falha/deadlock é erro, nunca resultado aceito.
+- Callbacks `then` capturam sucesso como null e erro como unknown para evitar rejeição
+  não tratada enquanto outra sessão é observada. `finally` libera gate e aguarda
+  Promise.allSettled das sessões antes de cleanup; asserts exigem sucesso onde cabível.
+
+Esses cenários também confirmam KEY SHARE concorrente com NO KEY UPDATE: o INSERT da
+FK na segunda sessão termina antes de ela ser observada esperando no lock explícito.
+Uma carteira diferente avançar durante essa espera exclui um lock global na unidade
+para esse cenário. Não afirmamos benchmark, tolerância a queda de processo ou ausência
+universal de deadlock. As futuras Inbox e Outbox devem usar esta mesma fronteira; só
+um relay após commit poderá publicar em SQS com segurança transacional.
+
+Fontes primárias: [transações MikroORM](https://mikro-orm.io/docs/transactions),
+[Unit of Work MikroORM](https://mikro-orm.io/docs/unit-of-work) e
+[locks PostgreSQL17](https://www.postgresql.org/docs/17/explicit-locking.html).
+
+### Resultado executado da etapa de persistência
+
+Com PostgreSQL e LocalStack reais saudáveis, em23/10/2026:
+
+| Comando | Resultado |
+|---|---|
+| `bun run check` (DATABASE_URL local configurada) | typecheck OK; 424 testes aprovados; build OK |
+| `bun run test:persistence` | 15 aprovados: 2 mappers SQL, 4 repositórios, 7 unidade/permissões, 2 concorrência |
+| `bun run test:financial` | 34 aprovados, constraints existentes preservadas |
+| `bun run test:orm` | 2 aprovados, incluindo DI da nova unidade |
+| `bun run test:migrations` | 2 aprovados, rollback real de DDL |
+| `bun run test:infra` | 2 PostgreSQL + 4 SQS aprovados, incluindo restart/recriação |
+
+Total: **483 testes distintos**, 44 novos sobre439. A contagem não soma novamente
+execuções repetidas da mesma suite. Os testes financeiros usam bancos descartáveis;
+consulta final de catálogo confirmou nenhum `dwp_test_*` restante. Consulta de
+pg_tables no database principal wagering/public retornou zero linhas; nenhuma
+migration financeira foi aplicada nele. Não houve alteração das classes de domínio
+ou das migrations existentes, nem push.
+
+Correções encontradas no caminho: timestamptz bruto em string exigiu conversão
+explícita; ORDER BY com projeção duplicada exigiu colunas explícitas e ordenação pela
+versão bigint; check inicial sem DATABASE_URL precisou da configuração local existente.
+Não mascaramos essas falhas e não alteramos proteções SQL para resolvê-las.
+
+```mermaid
+sequenceDiagram
+  participant C as Futuro caso de uso
+  participant U as FinancialUnitOfWork
+  participant R as Repositórios e mappers
+  participant P as PostgreSQL
+  C->>U: run(callback)
+  U->>P: BEGIN READ COMMITTED
+  U->>R: mesma sessão transacional
+  R->>P: SELECT ... FOR NO KEY UPDATE
+  P-->>R: linha atual após obter lock
+  R-->>C: Wallet.rehydrate
+  C->>R: save / insert por movimento
+  R->>P: UPDATE Wallet + INSERT/UPDATE tx + INSERT ledger
+  C-->>U: callback concluído
+  Note over U: ORM chama flush (sem entidades financeiras gerenciadas)
+  U->>P: COMMIT e constraints diferíveis
+  alt todas as invariantes satisfeitas
+    P-->>U: confirmado; locks liberados
+    U-->>C: resultado
+  else erro
+    P-->>U: rollback; locks liberados
+    U-->>C: rejeição; descartar objetos mutados
+  end
+```
+
+Próxima funcionalidade recomendada: contratos de eventos e persistência transacional
+Inbox/Outbox, com nova autorização. Ainda faltam relay, consumers, replay HTTP,
+retry/TTL e casos de uso públicos. A integração desta etapa não prova essas partes.
